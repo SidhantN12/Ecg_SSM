@@ -1,0 +1,172 @@
+import argparse
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+from ssm_model import ECGSSMClassifier
+
+
+DATA_URL = "https://www.kaggle.com/datasets/shayanfazeli/heartbeat"
+
+
+class ECGDataset(Dataset):
+    def __init__(self, X: np.ndarray, y: np.ndarray):
+        self.X = torch.from_numpy(X.astype(np.float32))
+        self.y = torch.from_numpy(y.astype(np.int64))
+
+    def __len__(self):
+        return self.X.shape[0]
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+def load_kaggle_heartbeat(data_dir: Path, auto_download: bool = False):
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _find_root(base: Path):
+        for p in base.glob("**/mitbih_train.csv"):
+            test_p = p.parent / "mitbih_test.csv"
+            if test_p.exists():
+                return p.parent
+        return None
+
+    root = _find_root(data_dir)
+
+    if root is None and auto_download:
+        print("Downloading Kaggle dataset (requires kaggle.json or env vars)...")
+        try:
+            import opendatasets as od  # imported only if needed
+        except Exception as e:
+            raise RuntimeError(
+                "opendatasets is required for auto-download. Install it or supply local CSVs."
+            ) from e
+        od.download(DATA_URL, data_dir=str(data_dir))
+        root = _find_root(data_dir)
+
+    if root is None:
+        raise FileNotFoundError(
+            "Could not find mitbih_train.csv/mitbih_test.csv under the provided data directory. "
+            "Either place the CSVs locally or run with --auto-download and valid Kaggle credentials."
+        )
+
+    train_csv = root / "mitbih_train.csv"
+    test_csv = root / "mitbih_test.csv"
+
+    train_df = pd.read_csv(train_csv, header=None)
+    test_df = pd.read_csv(test_csv, header=None)
+
+    X_train = train_df.iloc[:, :-1].values
+    y_train = train_df.iloc[:, -1].values.astype(int)
+    X_test = test_df.iloc[:, :-1].values
+    y_test = test_df.iloc[:, -1].values.astype(int)
+
+    return (X_train, y_train), (X_test, y_test)
+
+
+def normalize_per_example(X: np.ndarray):
+    # z-score per example for ECG beats
+    mu = X.mean(axis=1, keepdims=True)
+    sd = X.std(axis=1, keepdims=True) + 1e-6
+    return (X - mu) / sd
+
+
+def train(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data_dir = Path(args.data_dir)
+    models_dir = Path(args.models_dir)
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    (X_train, y_train), (X_test, y_test) = load_kaggle_heartbeat(data_dir, auto_download=args.auto_download)
+    X_train = normalize_per_example(X_train)
+    X_test = normalize_per_example(X_test)
+
+    # Optionally subsample for quick demo
+    if args.max_train > 0:
+        X_train = X_train[: args.max_train]
+        y_train = y_train[: args.max_train]
+    if args.max_test > 0:
+        X_test = X_test[: args.max_test]
+        y_test = y_test[: args.max_test]
+
+    train_ds = ECGDataset(X_train, y_train)
+    test_ds = ECGDataset(X_test, y_test)
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+
+    model = ECGSSMClassifier(num_classes=5, d_state=args.d_state, hidden=args.hidden, depth=args.depth, dropout=args.dropout)
+    model.to(device)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    criterion = nn.CrossEntropyLoss()
+
+    def evaluate():
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for xb, yb in test_loader:
+                xb = xb.to(device)
+                yb = yb.to(device)
+                logits = model(xb)
+                pred = logits.argmax(dim=1)
+                correct += (pred == yb).sum().item()
+                total += yb.numel()
+        return correct / max(1, total)
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
+        for xb, yb in pbar:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            logits = model(xb)
+            loss = criterion(logits, yb)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            pbar.set_postfix(loss=loss.item())
+        sched.step()
+        acc = evaluate()
+        print(f"Val acc: {acc:.4f}")
+
+    save_path = models_dir / "ecg_ssm.pt"
+    torch.save({
+        "model_state": model.state_dict(),
+        "config": {
+            "num_classes": 5,
+            "d_state": args.d_state,
+            "hidden": args.hidden,
+            "depth": args.depth,
+            "dropout": args.dropout,
+        },
+    }, save_path)
+    print(f"Saved model to {save_path}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", type=str, default="data")
+    parser.add_argument("--models-dir", type=str, default="models")
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=3e-3)
+    parser.add_argument("--d-state", type=int, default=64)
+    parser.add_argument("--hidden", type=int, default=64)
+    parser.add_argument("--depth", type=int, default=3)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--max-train", type=int, default=50000, help="0 for all; limit for quick demo")
+    parser.add_argument("--max-test", type=int, default=10000, help="0 for all; limit for quick demo")
+    parser.add_argument("--auto-download", action="store_true", help="Download dataset via Kaggle if not found locally")
+    args = parser.parse_args()
+    train(args)

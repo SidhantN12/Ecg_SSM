@@ -1,0 +1,10 @@
+numpy
+pandas
+scikit-learn
+torch>=2.0
+torchvision
+tqdm
+opendatasets
+streamlit
+plotly
+pyserial
