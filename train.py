@@ -42,21 +42,32 @@ def load_kaggle_heartbeat(data_dir: Path, auto_download: bool = False):
     root = _find_root(data_dir)
 
     if root is None and auto_download:
-        print("Downloading Kaggle dataset (requires kaggle.json or env vars)...")
+        # Check for Kaggle credentials in env vars
+        if not (os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY")):
+            print("WARNING: KAGGLE_USERNAME and KAGGLE_KEY environment variables are not set.")
+            print("opendatasets will likely prompt for them interactively.")
+            
+        print(f"Downloading Kaggle dataset from {DATA_URL}...")
         try:
-            import opendatasets as od  # imported only if needed
-        except Exception as e:
+            import opendatasets as od
+        except ImportError:
             raise RuntimeError(
-                "opendatasets is required for auto-download. Install it or supply local CSVs."
-            ) from e
+                "opendatasets is required for auto-download. Install it via: pip install opendatasets"
+            )
         od.download(DATA_URL, data_dir=str(data_dir))
         root = _find_root(data_dir)
 
     if root is None:
-        raise FileNotFoundError(
-            "Could not find mitbih_train.csv/mitbih_test.csv under the provided data directory. "
-            "Either place the CSVs locally or run with --auto-download and valid Kaggle credentials."
-        )
+        if not auto_download:
+            raise FileNotFoundError(
+                "Could not find mitbih_train.csv/mitbih_test.csv in the data directory. "
+                "HINT: If you want the script to download the data for you, run with the '--auto-download' flag."
+            )
+        else:
+            raise FileNotFoundError(
+                "Could not find mitbih_train.csv/mitbih_test.csv even after attempting auto-download. "
+                "Check your Kaggle credentials (KAGGLE_USERNAME and KAGGLE_KEY environment variables)."
+            )
 
     train_csv = root / "mitbih_train.csv"
     test_csv = root / "mitbih_test.csv"
