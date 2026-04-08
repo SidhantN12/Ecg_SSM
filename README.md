@@ -23,12 +23,6 @@ Quick start
 3) Run realtime app (simulated by default)
    streamlit run app.py
 
-Kaggle setup (once)
-- Make a Kaggle account → Account → Create New API Token → downloads kaggle.json
-- Place kaggle.json in one of:
-  - %USERPROFILE%\.kaggle\kaggle.json (Windows)
-  - Or set env vars: KAGGLE_USERNAME, KAGGLE_KEY
-
 Serial input (optional)
 - Hardware: simple ECG sensor (e.g., AD8232) + Arduino/Nano/ESP32, send integer samples via Serial at a known sample rate.
 - App settings: choose "Serial", set COM port (e.g., COM3) and sample rate (e.g., 250 Hz).
@@ -38,4 +32,4 @@ Notes
 - The SSM here is a simple diagonal state-space layer (learnable, stable) stacked a few times for a lightweight, dependency-free SSM.
 - You can increase epochs and model width for accuracy.
 
->>>>>>> 7d6ce75 (Initial commit: ECG SSM realtime project)
+
