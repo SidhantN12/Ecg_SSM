@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, f1_score
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
@@ -85,9 +85,18 @@ def train(args):
     models_dir = Path(args.models_dir)
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    (X_train, y_train), (X_test, y_test) = load_kaggle_heartbeat(data_dir, auto_download=args.auto_download)
-    X_train = normalize_per_example(X_train)
+    (X_train_full, y_train_full), (X_test, y_test) = load_kaggle_heartbeat(data_dir, auto_download=args.auto_download)
+    X_train_full = normalize_per_example(X_train_full)
     X_test = normalize_per_example(X_test)
+
+    # Infer number of classes
+    num_classes = len(np.unique(y_train_full))
+    print(f"Inferred {num_classes} classes from dataset.")
+
+    # 1. Implement 90/10 Validation Split to prevent test leakage
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full, y_train_full, test_size=0.1, random_state=42, stratify=y_train_full
+    )
 
     # Optionally subsample for quick demo
     if args.max_train > 0:
@@ -98,59 +107,95 @@ def train(args):
         y_test = y_test[: args.max_test]
 
     train_ds = ECGDataset(X_train, y_train)
+    val_ds = ECGDataset(X_val, y_val)
     test_ds = ECGDataset(X_test, y_test)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    model = ECGSSMClassifier(num_classes=5, d_state=args.d_state, hidden=args.hidden, depth=args.depth, dropout=args.dropout)
+    model = ECGSSMClassifier(num_classes=num_classes, d_state=args.d_state, hidden=args.hidden, depth=args.depth, dropout=args.dropout)
     model.to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     criterion = nn.CrossEntropyLoss()
 
-    def evaluate():
+    def evaluate(loader):
         model.eval()
-        correct = 0
-        total = 0
+        all_preds = []
+        all_labels = []
+        total_loss = 0
         with torch.no_grad():
-            for xb, yb in test_loader:
-                xb = xb.to(device)
-                yb = yb.to(device)
+            for xb, yb in loader:
+                xb, yb = xb.to(device), yb.to(device)
                 logits = model(xb)
-                pred = logits.argmax(dim=1)
-                correct += (pred == yb).sum().item()
-                total += yb.numel()
-        return correct / max(1, total)
+                loss = criterion(logits, yb)
+                total_loss += loss.item()
+                all_preds.append(logits.argmax(dim=1).cpu().numpy())
+                all_labels.append(yb.cpu().numpy())
+        
+        preds = np.concatenate(all_preds)
+        labels = np.concatenate(all_labels)
+        f1 = f1_score(labels, preds, average='macro')
+        acc = (preds == labels).mean()
+        return total_loss / len(loader), f1, acc
+
+    best_f1 = 0
+    patience = 3
+    counter = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
         for xb, yb in pbar:
-            xb = xb.to(device)
-            yb = yb.to(device)
+            xb, yb = xb.to(device), yb.to(device)
             logits = model(xb)
             loss = criterion(logits, yb)
             opt.zero_grad()
             loss.backward()
             opt.step()
             pbar.set_postfix(loss=loss.item())
+        
         sched.step()
-        acc = evaluate()
-        print(f"Val acc: {acc:.4f}")
+        val_loss, val_f1, val_acc = evaluate(val_loader)
+        print(f"Val Loss: {val_loss:.4f} | Val F1 (macro): {val_f1:.4f} | Val Acc: {val_acc:.4f}")
 
-    save_path = models_dir / "ecg_ssm.pt"
-    torch.save({
-        "model_state": model.state_dict(),
-        "config": {
-            "num_classes": 5,
-            "d_state": args.d_state,
-            "hidden": args.hidden,
-            "depth": args.depth,
-            "dropout": args.dropout,
-        },
-    }, save_path)
+        # Early Stopping logic
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            counter = 0
+            # Save best checkpoint
+            save_path = models_dir / "ecg_ssm.pt"
+            torch.save({
+                "model_state": model.state_dict(),
+                "config": {
+                    "num_classes": num_classes,
+                    "d_state": args.d_state,
+                    "hidden": args.hidden,
+                    "depth": args.depth,
+                    "dropout": args.dropout,
+                },
+            }, save_path)
+        else:
+            counter += 1
+            if counter >= patience:
+                print(f"Early stopping at epoch {epoch}")
+                break
+
+    # Final Evaluation on Test Set
+    print("\n--- Final Evaluation on Test Set ---")
+    test_loss, test_f1, test_acc = evaluate(test_loader)
+    print(f"Test F1 (macro): {test_f1:.4f} | Test Acc: {test_acc:.4f}")
+    
+    # Show detailed classification report for the test set
+    model.eval()
+    with torch.no_grad():
+        X_test_t = torch.from_numpy(X_test).to(device)
+        test_logits = model(X_test_t)
+        test_preds = test_logits.argmax(dim=1).cpu().numpy()
+        print("\nClassification Report:")
+        print(classification_report(y_test, test_preds))
     print(f"Saved model to {save_path}")
 
 

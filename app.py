@@ -99,28 +99,39 @@ def loop_stream():
 
     runner = st.session_state.runner
     start = st.session_state.start_time
+    
+    # UI Throttling
+    last_ui_update = 0
+    ui_update_interval = 1.0 / 30.0 # 30Hz cap
+    
     try:
         while True:
             s = next(gen)
             now = time.time() - start
             st.session_state.samples.append(float(s))
             st.session_state.timestamps.append(now)
+            
+            # Keep last few seconds visible
+            max_points = int(sample_rate * 5) # Show 5 seconds instead of 10 for speed
+            if len(st.session_state.samples) > max_points:
+                st.session_state.samples = st.session_state.samples[-max_points:]
+                st.session_state.timestamps = st.session_state.timestamps[-max_points:]
+
             out = runner.step(float(s))
             if out is not None:
                 label, probs = out
                 st.session_state.label = label
                 st.session_state.last_probs = probs
 
-            # Keep last few seconds visible
-            max_points = int(sample_rate * 10)
-            st.session_state.samples = st.session_state.samples[-max_points:]
-            st.session_state.timestamps = st.session_state.timestamps[-max_points:]
+            # Throttle UI updates to 30Hz
+            current_time = time.time()
+            if current_time - last_ui_update > ui_update_interval:
+                render_plot(st.session_state.timestamps, st.session_state.samples)
+                placeholder_label.markdown(f"### Prediction: {st.session_state.label}")
+                render_probs(st.session_state.last_probs)
+                last_ui_update = current_time
 
-            render_plot(st.session_state.timestamps, st.session_state.samples)
-            placeholder_label.markdown(f"### Prediction: {st.session_state.label}")
-            render_probs(st.session_state.last_probs)
-
-            # Streamlit needs to yield control to update UI
+            # Small sleep to allow background tasks/UI to keep up
             time.sleep(0.001)
     except StopIteration:
         pass
