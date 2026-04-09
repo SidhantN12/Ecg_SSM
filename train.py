@@ -202,7 +202,7 @@ def train(args):
     # Show detailed classification report for the test set
     model.eval()
     with torch.no_grad():
-        X_test_t = torch.from_numpy(X_test).to(device)
+        X_test_t = torch.from_numpy(X_test.astype(np.float32)).to(device)
         test_logits = model(X_test_t)
         test_preds = test_logits.argmax(dim=1).cpu().numpy()
         print("\nClassification Report:")
