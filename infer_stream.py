@@ -4,6 +4,8 @@ from queue import Queue
 from pathlib import Path
 from typing import Dict, Generator, Optional, Tuple
 import json
+import struct
+import math
 
 import numpy as np
 import pandas as pd
@@ -36,34 +38,46 @@ LABEL_MAP = {
     4: "Q (Unknown)"
 }
 
+def crc8_python(data: bytes) -> int:
+    crc = 0x00
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = (crc << 1) ^ 0x07
+            else:
+                crc <<= 1
+            crc &= 0xFF
+    return crc
+
 class WelfordOnline:
-    """Implement Welford's online algorithm for O(1) mean/std tracking."""
+    """Implement a true O(1) sliding window Welford's algorithm for normalization."""
     def __init__(self, window_size: int = 187):
         self.window_size = window_size
         self.samples = deque(maxlen=window_size)
-        self.n = 0
         self.mean = 0.0
         self.m2 = 0.0
 
-    def update(self, x: float):
-        if len(self.samples) == self.window_size:
-            old_x = self.samples[0]
-            # Simple approximation for rolling: replace old with new
-            # For exact rolling Welford, it's more complex. 
-            # Given the high frequency, we'll use a slightly simplified version
-            # or just recalculate if precision is critical.
-            # But O(1) is the goal.
-            pass
-        
-        self.samples.append(x)
-        self.n = len(self.samples)
-        if self.n == 0: return 0.0
-        
-        # Recalculate for accuracy in small windows, still faster than full array creation
-        data = np.array(self.samples)
-        self.mean = data.mean()
-        self.std = data.std() + 1e-6
-        return (x - self.mean) / self.std
+    def update(self, x: float) -> float:
+        if len(self.samples) < self.window_size:
+            # Filling the window
+            self.samples.append(x)
+            old_mean = self.mean
+            self.mean += (x - old_mean) / len(self.samples)
+            self.m2 += (x - old_mean) * (x - self.mean)
+        else:
+            # Sliding the window
+            x_old = self.samples.popleft()
+            self.samples.append(x)
+            
+            delta = x - x_old
+            old_mean = self.mean
+            self.mean += delta / self.window_size
+            self.m2 += delta * (x - self.mean + x_old - old_mean)
+
+        std = math.sqrt(self.m2 / len(self.samples)) if self.m2 > 0 else 1.0
+        std = std if std > 1e-6 else 1.0
+        return (x - self.mean) / std
 
 
 def load_model(models_dir: Path) -> ECGSSMClassifier:
@@ -136,11 +150,41 @@ def mqtt_stream(host: str, port: int = 1883, topic: str = "ecg/data", keepalive:
         client.subscribe(topic)
 
     def on_message(client, userdata, msg):
-        payload = msg.payload.decode("utf-8", errors="ignore").strip()
-        if not payload:
+        payload = msg.payload
+        if not payload or len(payload) < 7: # Header(1) + Seq(4) + Count(1) + CRC(1)
             return
-        for value in parse_mqtt_samples(payload):
-            samples.put(value)
+        
+        # Binary protocol decoding
+        if payload[0] == 0xA5:
+            header_size = 6 # Header + Seq + Count
+            # 0xA5 (B) + Seq (I) + Count (B)
+            magic, seq, count = struct.unpack("<BIB", payload[:6])
+            
+            # The data length is count * 4 (floats)
+            data_end = header_size + count * 4
+            if len(payload) < data_end + 1:
+                return
+            
+            # Verify CRC
+            received_crc = payload[data_end]
+            calculated_crc = crc8_python(payload[:data_end])
+            if received_crc != calculated_crc:
+                print(f"CRC Mismatch: {received_crc} != {calculated_crc}")
+                return
+            
+            # Unpack floats
+            samples_data = payload[header_size:data_end]
+            float_samples = struct.unpack(f"<{count}f", samples_data)
+            for s in float_samples:
+                samples.put(s)
+        else:
+            # Fallback for old/debug string messages (if any, though broken compatibility is intended)
+            try:
+                line = payload.decode("utf-8", errors="ignore").strip()
+                for val in parse_mqtt_samples(line):
+                    samples.put(val)
+            except Exception:
+                pass
 
     client = mqtt.Client()
     client.on_connect = on_connect
@@ -222,34 +266,19 @@ class RealtimeRunner:
         self.window_size = window_size
         self.normalizer = WelfordOnline(window_size=window_size)
         self.states = None
-        # Track hidden states to approximate pooling
-        self.h_rolling = deque(maxlen=window_size)
-
     @torch.no_grad()
     def step(self, sample: float) -> Optional[Tuple[str, Dict[str, float]]]:
         # 1. O(1) Normalization
         x_norm = self.normalizer.update(sample)
         
-        # 2. Stateful SSM Step
+        # 2. Stateful SSM + Pooling Step (Now O(1) internally)
         xt = torch.tensor([[x_norm]], device=self.device, dtype=torch.float32)
-        h, self.states = self.model.step(xt, self.states)
+        logits, self.states = self.model.step(xt, self.states)
         
-        # 3. Handle Pooling/Prediction
-        # We need to approximate the (AvgPool + MaxPool) used in training
-        self.h_rolling.append(h)
-        if len(self.h_rolling) < self.window_size:
+        # 3. Handle Prediction (Wait for window to fill)
+        if len(self.normalizer.samples) < self.window_size:
             return None
-            
-        # Combine rolling hidden states
-        h_all = torch.stack(list(self.h_rolling), dim=1) # (B, T, H)
-        avg_p = h_all.mean(dim=1)
-        if getattr(self.model, "streaming_pool", "avgmax") == "avg":
-            pooled = avg_p
-        else:
-            max_p = h_all.max(dim=1)[0]
-            pooled = torch.cat([avg_p, max_p], dim=-1)
 
-        logits = self.model.head(pooled)
         probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
         pred = int(probs.argmax())
         label = LABEL_MAP.get(pred, str(pred))

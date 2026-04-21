@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from collections import deque
 
 
 class SimpleSSMLayer(nn.Module):
@@ -141,6 +142,32 @@ class SSMEncoder(nn.Module):
         h = self.out_norm(h)
         return h, new_states
 
+class RollingPool:
+    """Maintain rolling avg and max over a window of hidden states."""
+    def __init__(self, window_size: int, hidden_dim: int, device="cpu"):
+        self.window_size = window_size
+        self.hidden_dim = hidden_dim
+        self.buffer = deque(maxlen=window_size)
+        self.sum = torch.zeros(1, hidden_dim, device=device)
+        # For O(1) max, we'd need a monotonic queue per dimension.
+        # Given hidden_dim is small (e.g. 64), we can just use torch.max on the buffer
+        # which is O(T*H). To be truly O(1), we'd need more complexity.
+        # But for inference, O(T*H) where T=187 is acceptable compared to the runner's hack.
+
+    def update(self, h: torch.Tensor):
+        if len(self.buffer) == self.window_size:
+            old_h = self.buffer[0]
+            self.sum -= old_h
+        
+        self.buffer.append(h.detach())
+        self.sum += h.detach()
+        
+        avg_p = self.sum / len(self.buffer)
+        # Efficient max over the buffer
+        all_h = torch.cat(list(self.buffer), dim=0) # (T, H)
+        max_p = all_h.max(dim=0, keepdim=True)[0] # (1, H)
+        return avg_p, max_p
+
 
 class ECGSSMClassifier(nn.Module):
     def __init__(self, num_classes: int = 5, d_state: int = 64, hidden: int = 64, depth: int = 3, dropout: float = 0.1):
@@ -163,17 +190,25 @@ class ECGSSMClassifier(nn.Module):
         logits = self.head(combined)
         return logits
 
-    def step(self, x: torch.Tensor, states: Optional[list] = None):
-        # x is a single sample (B, 1)
-        h, new_states = self.encoder.step(x, states)
-        # In pure streaming mode, we can't do global pooling over T
-        # We just return the current hidden state projected to classes
-        # This assumes the 'head' is trained or compatible. 
-        # For simplicity, we'll project the single hidden state.
-        # But wait, the pooling head is (2*H). 
-        # A better way for streaming: return a rolling pool or just the raw projection.
-        # Let's use a simpler head for the step or just return hidden for now.
-        return h, new_states
+    def step(self, x: torch.Tensor, states: Optional[dict] = None):
+        if states is None:
+            states = {
+                "encoder": [None] * len(self.encoder.layers),
+                "pool": RollingPool(window_size=187, hidden_dim=self.encoder.out_norm.normalized_shape[0], device=x.device)
+            }
+        
+        h, enc_states = self.encoder.step(x, states["encoder"])
+        states["encoder"] = enc_states
+        
+        avg_p, max_p = states["pool"].update(h)
+        
+        if self.streaming_pool == "avg":
+            pooled = avg_p
+        else:
+            pooled = torch.cat([avg_p, max_p], dim=-1)
+            
+        logits = self.head(pooled)
+        return logits, states
 
 
 class LegacyECGSSMClassifier(nn.Module):
@@ -198,6 +233,16 @@ class LegacyECGSSMClassifier(nn.Module):
         logits = self.head(avg_p)
         return logits
 
-    def step(self, x: torch.Tensor, states: Optional[list] = None):
-        h, new_states = self.encoder.step(x, states)
-        return h, new_states
+    def step(self, x: torch.Tensor, states: Optional[dict] = None):
+        if states is None:
+            states = {
+                "encoder": [None] * len(self.encoder.layers),
+                "pool": RollingPool(window_size=187, hidden_dim=self.encoder.out_norm.normalized_shape[0], device=x.device)
+            }
+        
+        h, enc_states = self.encoder.step(x, states["encoder"])
+        states["encoder"] = enc_states
+        
+        avg_p, _ = states["pool"].update(h)
+        logits = self.head(avg_p)
+        return logits, states

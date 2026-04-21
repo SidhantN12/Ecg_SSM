@@ -1,6 +1,11 @@
 #pragma once
 
 #include <cmath>
+#include <vector>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /**
  * @brief Biquad Filter Coefficients
@@ -11,11 +16,10 @@ struct BiquadCoeffs {
 
 /**
  * @brief A modular Biquad filter implementation using Direct Form II Transposed.
- * This structure is highly efficient for both software and FPGA (LUT-based) implementation.
  */
 class BiquadFilter {
 private:
-    float z1 = 0, z2 = 0; // Delay registers
+    float z1 = 0, z2 = 0; 
 
 public:
     inline float process(float x, const BiquadCoeffs& c) {
@@ -29,38 +33,95 @@ public:
         z1 = 0;
         z2 = 0;
     }
+
+    /**
+     * @brief Calculate Low-Pass Filter coefficients
+     */
+    static BiquadCoeffs calculate_lpf(float fc, float fs, float Q = 0.7071) {
+        float omega = 2.0f * M_PI * fc / fs;
+        float sn = sinf(omega);
+        float cs = cosf(omega);
+        float alpha = sn / (2.0f * Q);
+        
+        float a0 = 1.0f + alpha;
+        return {
+            ((1.0f - cs) / 2.0f) / a0,
+            (1.0f - cs) / a0,
+            ((1.0f - cs) / 2.0f) / a0,
+            (-2.0f * cs) / a0,
+            (1.0f - alpha) / a0
+        };
+    }
+
+    /**
+     * @brief Calculate High-Pass Filter coefficients
+     */
+    static BiquadCoeffs calculate_hpf(float fc, float fs, float Q = 0.7071) {
+        float omega = 2.0f * M_PI * fc / fs;
+        float sn = sinf(omega);
+        float cs = cosf(omega);
+        float alpha = sn / (2.0f * Q);
+        
+        float a0 = 1.0f + alpha;
+        return {
+            ((1.0f + cs) / 2.0f) / a0,
+            -(1.0f + cs) / a0,
+            ((1.0f + cs) / 2.0f) / a0,
+            (-2.0f * cs) / a0,
+            (1.0f - alpha) / a0
+        };
+    }
+
+    /**
+     * @brief Calculate Notch Filter coefficients (50/60 Hz)
+     */
+    static BiquadCoeffs calculate_notch(float fn, float fs, float BW = 2.0) {
+        float omega = 2.0f * M_PI * fn / fs;
+        float sn = sinf(omega);
+        float cs = cosf(omega);
+        float alpha = sn * sinhf(logf(2.0f) / 2.0f * BW * omega / sn);
+        
+        float a0 = 1.0f + alpha;
+        return {
+            1.0f / a0,
+            -2.0f * cs / a0,
+            1.0f / a0,
+            -2.0f * cs / a0,
+            (1.0f - alpha) / a0
+        };
+    }
 };
 
 /**
  * @brief ECG Signal Processing Pipeline
  * Cascades High-Pass, Notch, and Low-Pass filters.
- * Target Sample Rate: 250 Hz (Default)
  */
 class EcgFilterPipeline {
-public:
-    // Coefficients for 250Hz sample rate
-    // HPF 0.5Hz, Notch 50Hz, LPF 100Hz
-    // Note: In a production environment, these would be pre-calculated or set via Kconfig.
-    
-    // HPF 0.5Hz @ 250Hz sample rate (approximate)
-    const BiquadCoeffs HPF_0_5HZ = {0.99115, -1.9823, 0.99115, -1.9822, 0.9824}; 
-    
-    // Notch 50Hz @ 250Hz sample rate
-    const BiquadCoeffs NOTCH_50HZ = {0.9650, -1.1345, 0.9650, -1.1345, 0.9300};
-    
-    // LPF 100Hz @ 250Hz sample rate
-    const BiquadCoeffs LPF_100HZ = {0.4208, 0.8416, 0.4208, 0.4419, 0.2413};
-
 private:
     BiquadFilter hpf;
     BiquadFilter notch;
     BiquadFilter lpf;
+    
+    BiquadCoeffs c_hpf;
+    BiquadCoeffs c_notch;
+    BiquadCoeffs c_lpf;
 
 public:
+    EcgFilterPipeline(float fs = 250.0f) {
+        setup(fs);
+    }
+
+    void setup(float fs) {
+        c_hpf = BiquadFilter::calculate_hpf(0.5f, fs);
+        c_notch = BiquadFilter::calculate_notch(50.0f, fs);
+        c_lpf = BiquadFilter::calculate_lpf(100.0f, fs);
+        reset();
+    }
+
     float apply(float sample) {
-        float x = hpf.process(sample, HPF_0_5HZ);
-        x = notch.process(x, NOTCH_50HZ);
-        x = lpf.process(x, LPF_100HZ);
+        float x = hpf.process(sample, c_hpf);
+        x = notch.process(x, c_notch);
+        x = lpf.process(x, c_lpf);
         return x;
     }
 
