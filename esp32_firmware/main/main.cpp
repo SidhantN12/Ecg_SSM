@@ -15,6 +15,8 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 
+#include "filter_pipeline.hpp"
+
 static const char *TAG = "ECG_MQTT_PUB";
 
 static EventGroupHandle_t wifi_event_group;
@@ -30,6 +32,8 @@ static constexpr gpio_num_t ECG_LO_MINUS_PIN = static_cast<gpio_num_t>(CONFIG_EC
 static constexpr int SAMPLE_RATE_HZ = CONFIG_ECG_SAMPLE_RATE_HZ;
 static constexpr TickType_t SAMPLE_DELAY_TICKS = pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ);
 static constexpr int MAX_BATCH_SIZE = 64;
+
+static EcgFilterPipeline filter_pipeline;
 
 static const char *wifi_auth_mode_name(wifi_auth_mode_t mode) {
     switch (mode) {
@@ -194,11 +198,13 @@ extern "C" void app_main(void) {
             continue;
         }
 
+        float filtered_sample = filter_pipeline.apply(static_cast<float>(sample));
+
         int written = 0;
         if (batch_count == 0) {
-            written = snprintf(payload, sizeof(payload), "%d", sample);
+            written = snprintf(payload, sizeof(payload), "%.2f", filtered_sample);
         } else {
-            written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",%d", sample);
+            written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",%.2f", filtered_sample);
         }
 
         if (written <= 0 || (payload_len + written) >= static_cast<int>(sizeof(payload))) {
