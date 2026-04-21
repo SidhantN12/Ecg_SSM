@@ -24,8 +24,9 @@ with st.sidebar:
     mqtt_topic = st.text_input("Topic", value="ecg/data")
     
     st.header("Processing Settings")
-    sample_rate = st.number_input("Sample Rate (Hz)", min_value=50, max_value=1000, value=250, step=1)
-    norm_window = st.slider("Normalization Window (Samples)", 50, 500, 187)
+    # Standardization: Fixed 187 Hz and 187 sample window
+    sample_rate = 187
+    norm_window = 187
     display_seconds = st.slider("Display Window (sec)", 1, 20, 5)
     
     col1, col2 = st.columns(2)

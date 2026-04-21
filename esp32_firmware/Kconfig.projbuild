@@ -55,13 +55,6 @@ config ECG_MQTT_RECONNECT_TIMEOUT_MS
     range 1000 60000
     default 10000
 
-config ECG_SAMPLE_RATE_HZ
-    int "Sampling rate (Hz)"
-    range 50 1000
-    default 250
-    help
-        Processing frequency for the ECG acquisition task.
-
 config ECG_ADC_CHANNEL
     int "ADC1 channel for AD8232 output"
     range 0 9

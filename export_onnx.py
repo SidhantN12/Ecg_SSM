@@ -13,29 +13,12 @@ class ONNXExportWrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x: torch.Tensor):
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
-
-        states = None
-        hidden_steps = []
-        seq_len = x.size(1)
-
-        for t in range(seq_len):
-            xt = x[:, t].unsqueeze(1)
-            h, states = self.model.step(xt, states)
-            hidden_steps.append(h)
-
-        h_all = torch.stack(hidden_steps, dim=1)
-        avg_p = h_all.mean(dim=1)
-
-        if getattr(self.model, "streaming_pool", "avgmax") == "avg":
-            pooled = avg_p
-        else:
-            max_p = h_all.max(dim=1)[0]
-            pooled = torch.cat([avg_p, max_p], dim=-1)
-
-        return self.model.head(pooled)
+    def forward(self, x: torch.Tensor, *states):
+        # Flattened state input for ONNX compatibility
+        # Re-bundle into what model.step_stateful expects
+        h, new_states = self.model.step_stateful(x, list(states))
+        # Return logits and new states
+        return self.model.head(h), *new_states
 
 # Load checkpoint
 ckpt = torch.load("models/ecg_ssm.pt", map_location="cpu")
@@ -52,13 +35,23 @@ model.load_state_dict(ckpt["model_state"])
 model.eval()
 export_model = ONNXExportWrapper(model).eval()
 
-dummy = torch.randn(1, 187)
+# Prepare dummy inputs for stateful step
+num_layers = len(model.encoder.layers)
+d_state = model.encoder.layers[0].d_state
+
+sample = torch.randn(1, 1)
+# Initial states (batch=1, d_state)
+states = [torch.zeros(1, d_state) for _ in range(num_layers)]
+
+input_names = ["input"] + [f"state_{i}" for i in range(num_layers)]
+output_names = ["output"] + [f"state_{i}_out" for i in range(num_layers)]
 
 torch.onnx.export(
     export_model,
-    dummy,
+    (sample, *states),
     "models/ecg_ssm.onnx",
-    input_names=["input"],
-    output_names=["output"],
+    input_names=input_names,
+    output_names=output_names,
     opset_version=18,
+    dynamic_axes={"input": {0: "batch"}, **{f"state_{i}": {0: "batch"} for i in range(num_layers)}}
 )

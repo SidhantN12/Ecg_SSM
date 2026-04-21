@@ -107,7 +107,7 @@ private:
     BiquadCoeffs c_lpf;
 
 public:
-    EcgFilterPipeline(float fs = 250.0f) {
+    EcgFilterPipeline(float fs = 187.0f) {
         setup(fs);
     }
 

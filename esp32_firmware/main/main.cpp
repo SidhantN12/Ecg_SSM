@@ -23,7 +23,7 @@ static const char *TAG = "ECG_SSM_V1";
 
 // --- Configuration Constants ---
 static constexpr uint32_t ADC_READ_LEN = 256; 
-static constexpr uint32_t SAMPLE_RATE_HZ = CONFIG_ECG_SAMPLE_RATE_HZ;
+static constexpr uint32_t SAMPLE_RATE_HZ = 187; // Standardized to MIT-BIH rate
 static constexpr uint32_t BATCH_SIZE = CONFIG_ECG_MQTT_BATCH_SIZE;
 
 // --- Global State ---
@@ -120,16 +120,24 @@ static void acquisition_task(void *pvParameters) {
     uint32_t ret_num = 0;
 
     while (true) {
+        // Lead-Off Detection Check
+        bool lo_pos = (CONFIG_ECG_LO_PLUS_GPIO != -1) ? gpio_get_level((gpio_num_t)CONFIG_ECG_LO_PLUS_GPIO) : false;
+        bool lo_neg = (CONFIG_ECG_LO_MINUS_GPIO != -1) ? gpio_get_level((gpio_num_t)CONFIG_ECG_LO_MINUS_GPIO) : false;
+        bool leads_off = lo_pos || lo_neg;
+
         esp_err_t ret = adc_continuous_read(adc_handle, result, ADC_READ_LEN, &ret_num, 0);
         if (ret == ESP_OK) {
             for (int i = 0; i < ret_num; i += SOC_ADC_DIGI_RESULT_BYTES) {
                 adc_digi_output_data_t *p = (adc_digi_output_data_t *)&result[i];
                 float sample = (float)p->type1.data;
-                float filtered = filter_pipeline.apply(sample);
+                
+                // If leads are off, zero the sample to prevent junk classification
+                float filtered = leads_off ? 0.0f : filter_pipeline.apply(sample);
+                
                 xQueueSend(sample_queue, &filtered, pdMS_TO_TICKS(10));
             }
         }
-        vTaskDelay(1);
+        vTaskDelay(pdMS_TO_TICKS(1)); 
     }
 }
 
@@ -139,7 +147,9 @@ static void acquisition_task(void *pvParameters) {
 static void publishing_task(void *pvParameters) {
     uint32_t sequence = 0;
     float batch[BATCH_SIZE];
-    uint8_t packet_buf[64]; // Sufficient for header + 16 floats + CRC
+    // Size: Header(6) + Data(BATCH_SIZE*4) + CRC(1)
+    // Max size with BATCH_SIZE=64 is 6 + 256 + 1 = 263 bytes
+    uint8_t packet_buf[256 + 16]; 
 
     while (true) {
         if (!mqtt_ready) {
