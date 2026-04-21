@@ -101,9 +101,10 @@ def normalize_chunk(x: np.ndarray) -> np.ndarray:
     return (x - mu) / sd
 
 
-def simulate_stream_from_csv(csv_path: Path, sample_rate_hz: int = 187, loop: bool = True) -> Generator[int, None, None]:
+def simulate_stream_from_csv(csv_path: Path, sample_rate_hz: int = 187, loop: bool = True) -> Generator[float, None, None]:
     """
-    Yields integer-like samples by stitching beats sequentially (mitbih_*.csv rows are 187-length beats).
+    Yields samples by stitching beats sequentially from MIT-BIH CSV rows.
+    Keep for testing/debugging purposes.
     """
     df = pd.read_csv(csv_path, header=None)
     X = df.iloc[:, :-1].values
@@ -114,26 +115,6 @@ def simulate_stream_from_csv(csv_path: Path, sample_rate_hz: int = 187, loop: bo
                 time.sleep(1.0 / sample_rate_hz)
         if not loop:
             break
-
-
-def serial_stream(port: str, baud: int = 115200, sample_rate_hz: int = 250) -> Generator[float, None, None]:
-    if serial is None:
-        raise RuntimeError("pyserial not installed. pip install pyserial")
-    try:
-        with serial.Serial(port, baudrate=baud, timeout=1) as ser:
-            ser.flushInput() # Start fresh
-            while True:
-                line = ser.readline().decode('utf-8', errors='ignore').strip()
-                if not line:
-                    continue
-                try:
-                    val = float(line)
-                    yield val
-                except ValueError:
-                    continue
-    except Exception as e:
-        print(f"Serial Error: {e}")
-        return
 
 
 def mqtt_stream(host: str, port: int = 1883, topic: str = "ecg/data", keepalive: int = 60) -> Generator[float, None, None]:
