@@ -6,7 +6,11 @@ This document provides a comprehensive technical reference for the `Ecg_SSM` pro
 
 ## 1. Executive Summary
 
-The `Ecg_SSM` project implements a lightweight, dependency-free State Space Model (SSM) in PyTorch to classify ECG heartbeats in real-time. It targets the MIT-BIH Arrhythmia Database, categorizing heartbeats into five distinct classes according to AAMI standards. The system supports both simulated streaming from CSV files and live serial input from hardware sensors like the AD8232.
+The `Ecg_SSM` project implements a lightweight, dependency-free State Space Model (SSM) in PyTorch to classify ECG heartbeats in real-time. It targets the MIT-BIH Arrhythmia Database, categorizing heartbeats into five distinct classes according to AAMI standards. The system supports:
+- **Simulated streaming** from CSV files.
+- **Serial input** via USB (AD8232 + Arduino).
+- **MQTT input** via WiFi (ESP32-S3).
+- **Flexible inference** using PyTorch or ONNX Runtime.
 
 ---
 
@@ -14,7 +18,7 @@ The `Ecg_SSM` project implements a lightweight, dependency-free State Space Mode
 
 ### 2.1 Diagonal State Space Models (DSSMs)
 
-State Space Models are a class of sequence models that bridge the gap between Recurrent Neural Networks (RNNs) and Convolutional Neural Networks (CNNs).
+State Space Models bridge the gap between Recurrent Neural Networks (RNNs) and Convolutional Neural Networks (CNNs).
 
 **Discrete-Time Recurrence:**
 The core of the SSM is the linear recurrence relation:
@@ -31,14 +35,11 @@ Where:
 In this implementation, the matrix $A$ is constrained to be **diagonal**. This allows the update to be computed as an element-wise multiplication ($x_{t+1} = a \odot x_t + b \cdot u_t$), which is significantly more efficient than full matrix-vector products.
 
 **Stability via Tanh Mapping:**
-To ensure the system is stable (i.e., the state doesn't explode over long sequences), the eigenvalues of the discrete transition matrix $A$ must reside within the unit circle ($|a| < 1$). This is enforced by passing the raw parameters through a `tanh` activation function before the recurrence step.
+To ensure stability, eigenvalues of the transition matrix $A$ must reside within the unit circle ($|a| < 1$). This is enforced by passing raw parameters through a `tanh` activation function.
 
 ### 2.2 ECG Signal Analysis & MIT-BIH Dataset
 
-The project utilizes the **MIT-BIH Arrhythmia Database**, which is a standard benchmark for ECG classification.
-
 **AAMI Heartbeat Classes:**
-Heartbeats are mapped into five categories based on the Association for the Advancement of Medical Instrumentation (AAMI) standards:
 1.  **N (Normal)**: Any heartbeat not classified as ectopic.
 2.  **S (SVEB)**: Supraventricular ectopic beat.
 3.  **V (VEB)**: Ventricular ectopic beat.
@@ -46,100 +47,70 @@ Heartbeats are mapped into five categories based on the Association for the Adva
 5.  **Q (Unknown)**: Unknown or unclassifiable beat.
 
 **Normalization (Z-Score):**
-ECG signals can vary in amplitude due to electrode placement or patient physiological differences. The system employs **Z-score normalization per heartbeat**:
+The system employs **Z-score normalization per heartbeat**:
 $$\hat{x} = \frac{x - \mu}{\sigma}$$
-This ensures the model is invariant to signal scale and baseline shifts.
+Hardware streams use **Welford's online algorithm** for $O(1)$ rolling normalization.
 
 ---
 
-## 3. Codebase Architecture: File-by-File Analysis
+## 3. Codebase Architecture
 
 ### `ssm_model.py`
-The core neural network definition. It implements a custom SSM layer from scratch without external libraries like `mamba-ssm`.
+The core neural network definition. Implements `SimpleSSMLayer`, `SSMEncoder`, and `ECGSSMClassifier`. It supports both global FFT-based convolution for training and a stateful `step()` method for inference.
 
 ### `train.py`
-The training pipeline for the model. Handles data downloading (via Kaggle), preprocessing, model training, and checkpointing.
+The training pipeline. Handles dataset fetching (Kaggle), preprocessing, training, and checkpointing.
 
 ### `infer_stream.py`
-The inference engine. Contains logic for loading models, processing rolling windows of data, and generating streams from various sources (CSV, Serial).
+The inference engine. Contains `RealtimeRunner` (PyTorch) and `ONNXRealtimeRunner`. It manages various stream generators: `simulate_stream_from_csv`, `serial_stream`, and `mqtt_stream`.
+
+### `export_onnx.py`
+Converts a trained PyTorch model to ONNX. It uses an `ONNXExportWrapper` to replace complex FFT ops with a recurrent loop, ensuring compatibility with standard ONNX runtimes.
 
 ### `app.py`
-The Streamlit frontend. Provides a real-time dashboard for visualizing the ECG signal and model predictions.
+The Streamlit frontend dashboard for live visualization and control.
+
+### `esp32_firmware/`
+C++/ESP-IDF firmware for publishing raw ECG samples from an ESP32-S3 to an MQTT broker.
 
 ---
 
-## 4. Function-by-Function Reference
+## 4. Technical Reference
 
 ### `ssm_model.py`
 
-#### `SimpleSSMLayer` (Class)
-A single diagonal SSM layer.
-- **`__init__(d_state, in_dim, out_dim, dropout)`**: Initializes learnable parameters `a_raw`, `b`, `c`, and `d`. `a_raw` is initialized to zero (mapping to 0 after tanh).
-- **`forward(u)`**: Executes the recurrence. Takes input `u` of shape `(B, T, in_dim)`. Computes state transitions using `torch.einsum` for efficiency and returns the sequence `y` of shape `(B, T, out_dim)`.
+#### `SimpleSSMLayer.step(u, state)`
+Executes a single-step recurrence for streaming.
+- **Input**: `u` (B, in_dim), `state` (B, d_state).
+- **Returns**: `y` (B, out_dim), `new_state`.
 
-#### `SSMEncoder` (Class)
-A stack of SSM layers with non-linearities.
-- **`__init__(d_state, hidden, depth, dropout)`**: Stacks multiple `SimpleSSMLayer` instances.
-- **`forward(x)`**: Applies an initial linear projection, followed by a loop through SSM layers with **GELU** activation and **residual connections**. Includes LayerNorm for training stability.
-
-#### `ECGSSMClassifier` (Class)
-The top-level model for classification.
-- **`forward(x)`**: Passes input through the `SSMEncoder`, followed by **Global Adaptive Average Pooling** over the time dimension and a linear head to produce logits for 5 classes.
-
-### `train.py`
-
-#### `ECGDataset` (Class)
-Standard PyTorch Dataset wrapper for ECG data.
-
-#### `load_kaggle_heartbeat(data_dir, auto_download)`
-Locates or downloads the MIT-BIH dataset. Uses `opendatasets` to fetch from Kaggle if permitted. Returns training and testing sets as numpy arrays.
-
-#### `normalize_per_example(X)`
-Applies Z-score normalization independently to each heartbeat row in the input matrix `X`.
-
-#### `train(args)`
-The main execution loop for training. Sets up the device (CUDA/CPU), initializes the `ECGSSMClassifier`, uses `AdamW` optimizer and `CosineAnnealingLR` scheduler. Saves the final model to `ecg_ssm.pt`.
+#### `LegacyECGSSMClassifier` (Class)
+Maintained for backward compatibility with older model checkpoints that used a single linear head instead of the current (Avg + Max) pooling head.
 
 ### `infer_stream.py`
 
-#### `RealtimeRunner` (Class)
-A stateful wrapper for inference during streaming.
-- **`__init__(models_dir, window_size)`**: Loads the model and initializes a `deque` (walking window) to store incoming samples.
-- **`step(sample)`**: The core inference step. Appends a new sample to the window. If the window is full, it normalizes the chunk, runs model inference, and returns the predicted label and class probabilities.
+#### `mqtt_stream(host, port, topic)`
+A generator that connects to an MQTT broker and yields ECG samples in real-time. Supports single values, CSV strings, and JSON payloads via `parse_mqtt_samples`.
 
-#### `simulate_stream_from_csv(csv_path, sample_rate_hz)`
-A generator that reads heartbeats from a CSV file and yields them one-by-one at a specified frequency (default 187 Hz) to simulate a real-time sensor.
+#### `ONNXRealtimeRunner` (Class)
+High-performance inference runner using ONNX Runtime. Unlike the PyTorch runner, it operates on a sliding window buffer rather than stateful recurrence, making it extremely robust.
 
-#### `serial_stream(port, baud, sample_rate_hz)`
-A generator that reads from a serial port (e.g., Arduino). Expects newline-separated float values.
+### `export_onnx.py`
 
-### `app.py`
-
-#### `loop_stream()`
-The main loop for the Streamlit app. It pulls samples from the selected generator (Simulated or Serial), updates the internal state of the `RealtimeRunner`, and refreshes the Plotly charts and class probability bars.
+#### `ONNXExportWrapper` (Class)
+Re-implements the forward pass using the `step()` method to avoid `torch.fft` ops, which are often poorly supported in edge ONNX runtimes.
 
 ---
 
-## 5. Data Specifications
+## 5. Hardware Integration
 
-- **Input Shape**: `(Batch, Time)` where `Time` is usually 187 samples (the length of one heartbeat in the MIT-BIH dataset).
-- **Sampling Rate**: The dataset is sampled at **125Hz** but provided in fixed-length segments of 188 samples (last column is label). In this project, the window size defaults to 187.
-- **Mapping (`LABEL_MAP`)**:
-    - `0`: N (Normal)
-    - `1`: S (SVEB)
-    - `2`: V (VEB)
-    - `3`: F (Fusion)
-    - `4`: Q (Unknown)
+### Serial (USB)
+1. Connect AD8232 to Arduino Analog A0.
+2. Flash `Serial.println(analogRead(A0))` at ~250Hz.
+3. Select **Serial** source in `app.py`.
 
----
-
-## 6. Hardware Integration (Serial)
-
-To use a live sensor:
-1. Connect an **AD8232 ECG sensor** to an Arduino (e.g., Nano/Uno).
-2. Upload a simple sketch that reads the analog pin and prints the value to Serial:
-   ```cpp
-   void setup() { Serial.begin(115200); }
-   void loop() { Serial.println(analogRead(A0)); delay(4); } // ~250Hz
-   ```
-3. In the Streamlit sidebar, select **Input source: Serial** and specify the correct COM port.
+### MQTT (WiFi)
+1. Use a Mosquitto broker or similar.
+2. Flash `esp32_firmware/` to an ESP32-S3.
+3. Configuration is handled via `idf.py menuconfig`.
+4. Select **MQTT** source in `app.py`.
