@@ -7,9 +7,8 @@ This document provides a comprehensive technical reference for the `Ecg_SSM` pro
 ## 1. Executive Summary
 
 The `Ecg_SSM` project implements a lightweight, dependency-free State Space Model (SSM) in PyTorch to classify ECG heartbeats in real-time. It targets the MIT-BIH Arrhythmia Database, categorizing heartbeats into five distinct classes according to AAMI standards. The system supports:
-- **Simulated streaming** from CSV files.
-- **Serial input** via USB (AD8232 + Arduino).
-- **MQTT input** via WiFi (ESP32-S3).
+- **MQTT input** via WiFi (Architecture v1: ESP32).
+- **Architecture v2 support** (RP2040 sampler + SLG47910V filtering).
 - **Flexible inference** using PyTorch or ONNX Runtime.
 
 ---
@@ -39,17 +38,16 @@ To ensure stability, eigenvalues of the transition matrix $A$ must reside within
 
 ### 2.2 ECG Signal Analysis & MIT-BIH Dataset
 
-**AAMI Heartbeat Classes:**
-1.  **N (Normal)**: Any heartbeat not classified as ectopic.
-2.  **S (SVEB)**: Supraventricular ectopic beat.
-3.  **V (VEB)**: Ventricular ectopic beat.
-4.  **F (Fusion)**: Fusion of ventricular and normal beats.
-5.  **Q (Unknown)**: Unknown or unclassifiable beat.
+- **N**: Normal beat
+- **S**: Supraventricular ectopic beat (SVEB)
+- **V**: Ventricular ectopic beat (VEB)
+- **F**: Fusion beat
+- **Q**: Unknown/unclassifiable beat
 
 **Normalization (Z-Score):**
 The system employs **Z-score normalization per heartbeat**:
 $$\hat{x} = \frac{x - \mu}{\sigma}$$
-Hardware streams use **Welford's online algorithm** for $O(1)$ rolling normalization.
+Hardware streams use a true **sliding-window Welford's algorithm** for $O(1)$ rolling normalization. This ensures stable mean and variance tracking without the performance impact of $O(T)$ buffer recalculation.
 
 ---
 
@@ -68,10 +66,10 @@ The inference engine. Contains `RealtimeRunner` (PyTorch) and `ONNXRealtimeRunne
 Converts a trained PyTorch model to ONNX. It uses an `ONNXExportWrapper` to replace complex FFT ops with a recurrent loop, ensuring compatibility with standard ONNX runtimes.
 
 ### `app.py`
-The Streamlit frontend dashboard for live visualization and control.
+The Streamlit frontend dashboard for live visualization, configuration, and inference control. It uses **NumPy circular buffers** for efficient plotting and supports dynamic adjustment of DSP parameters like the normalization window size.
 
 ### `esp32_firmware/`
-C++/ESP-IDF firmware for publishing raw ECG samples from an ESP32-S3 to an MQTT broker.
+C++/ESP-IDF firmware for high-fidelity ECG publishing. It utilizes the **ADC continuous (DMA)** driver to eliminate sampling jitter and a **Binary Protocol (Header + Seq + Data + CRC8)** for robust, low-latency telemetry.
 
 ---
 
@@ -84,13 +82,15 @@ Executes a single-step recurrence for streaming.
 - **Input**: `u` (B, in_dim), `state` (B, d_state).
 - **Returns**: `y` (B, out_dim), `new_state`.
 
-#### `LegacyECGSSMClassifier` (Class)
-Maintained for backward compatibility with older model checkpoints that used a single linear head instead of the current (Avg + Max) pooling head.
+#### `ECGSSMClassifier.step(x, states)`
+Executes a single-step recurrence and updates **Rolling Pooling States** (Mean and Max).
+- **Internal States**: Maintains a `RollingPool` object that provides $O(1)$ mean and $O(T*H)$ max for pooling.
+- **Output**: Returns the class probabilities based on the current window's latent state summary.
 
 ### `infer_stream.py`
 
 #### `mqtt_stream(host, port, topic)`
-A generator that connects to an MQTT broker and yields ECG samples in real-time. Supports single values, CSV strings, and JSON payloads via `parse_mqtt_samples`.
+A generator that connects to an MQTT broker and yields ECG samples. It decodes Architecture v1 **Binary Packets**, verifies the **CRC8 checksum**, and handles sequence tracking to ensure high-fidelity reconstruction.
 
 #### `ONNXRealtimeRunner` (Class)
 High-performance inference runner using ONNX Runtime. Unlike the PyTorch runner, it operates on a sliding window buffer rather than stateful recurrence, making it extremely robust.
@@ -102,15 +102,7 @@ Re-implements the forward pass using the `step()` method to avoid `torch.fft` op
 
 ---
 
-## 5. Hardware Integration
-
-### Serial (USB)
-1. Connect AD8232 to Arduino Analog A0.
-2. Flash `Serial.println(analogRead(A0))` at ~250Hz.
-3. Select **Serial** source in `app.py`.
-
-### MQTT (WiFi)
-1. Use a Mosquitto broker or similar.
-2. Flash `esp32_firmware/` to an ESP32-S3.
-3. Configuration is handled via `idf.py menuconfig`.
-4. Select **MQTT** source in `app.py`.
+### Architecture v1 Telemetry
+1. Flash `esp32_firmware/` to an ESP32 WROOM 32.
+2. Configuration is handled via `idf.py menuconfig`.
+3. Select **MQTT** source in `app.py`.

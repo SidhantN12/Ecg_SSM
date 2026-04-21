@@ -5,8 +5,8 @@ This document provides comprehensive instructions for setting up and running the
 ## 1. System Overview (Architecture v1)
 
 *   **Sensor**: AD8232 Heart Rate Monitor (Analog).
-*   **Edge Device**: ESP32 WROOM 32 (Samples ADC, filters in software, publishes to MQTT).
-*   **Host**: Raspberry Pi 4 (Runs MQTT Broker and Streamlit WebGUI).
+*   **Edge Device**: ESP32 (Continuous ADC sampling via DMA, real-time Biquad filtering, Binary MQTT publishing).
+*   **Host**: Raspberry Pi 4 (MQTT Broker, Streamlit Engine, SSM Inference).
 
 ---
 
@@ -68,7 +68,7 @@ idf.py menuconfig
 Set the following under **ECG Project Configuration**:
 *   **WiFi SSID & Password**: Your network credentials.
 *   **MQTT Broker URI**: `mqtt://<YOUR_RPI_IP_ADDRESS>`
-*   **Sample Rate**: 250 Hz (matches the software filter coefficients).
+*   **Sample Rate**: The firmware dynamically calculates biquad coefficients to match this. Default: 250 Hz.
 
 ### 4.3 Build and Flash
 ```bash
@@ -92,16 +92,15 @@ idf.py -p <PORT> flash monitor
 
 ## 6. Future Scope: Architecture v2
 
-The current Architecture v1 is designed to be modular. The following upgrades are planned for **Architecture v2**:
+The Architecture v1 refactor has modularized the acquisition and signal processing layers to simplify the **Architecture v2** migration:
 
-### 6.1 Deterministic Sampling (RP2040)
-*   The ESP32's internal ADC will be replaced by an **RP2040** (or similar) dedicated to high-precision, jitter-free sampling.
-*   Data will be passed to the ESP32 via SPI or High-speed UART.
+### 6.1 Modular Acquisition (RP2040)
+*   The ESP32's `adc_continuous` driver will be replaced by a dedicated **RP2040** module.
+*   Because acquisition is decoupled from transport in `main.cpp`, the ESP32 will simply swap the DMA reader task for an SPI/UART listener task while the rest of the telemetry pipeline remains unchanged.
 
 ### 6.2 Hardware Filtering (SLG47910V)
-*   The software `BiquadFilter` implementation in `filter_pipeline.hpp` will be ported to the **SLG47910V GreenPAK FPGA**.
-*   **How it works**: The Direct Form II Transposed structure can be mapped directly to the FPGA's Look-Up Tables (LUTs) and flip-flops, allowing for zero-CPU-overhead filtering.
+*   The `EcgFilterPipeline` class in `filter_pipeline.hpp` serves as a software wrapper.
+*   In v2, this wrapper will be updated to interface with the **SLG47910V GreenPAK FPGA** via I2C/SPI, allowing the CPU to bypass software biquads entirely while maintaining the same `apply()` interface for the system.
 
 ### 6.3 System Orchestration (ESP32)
-*   In v2, the ESP32 will transition from being a simple sampler to a **System Orchestrator**.
-*   It will manage the power states of the RP2040/FPGA, handle WiFi/BLE communication, and perform OTA (Over-The-Air) updates for the entire module.
+*   The ESP32's role transitions to a **System Orchestrator**, managing the lifecycle of edge components and handling secure WiFi/BLE communication.

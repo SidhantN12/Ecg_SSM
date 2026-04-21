@@ -1,10 +1,11 @@
-# ESP32-S3 MQTT Publisher
+# Architecture v1: ESP32 MQTT Publisher
 
-This firmware publishes raw AD8232 ECG samples from an ESP32-S3 to the MQTT topic used by the Python app:
+This firmware publishes filtered AD8232 ECG samples from an ESP32 WROOM 32 to the MQTT topic used by the Python app.
 
-- Topic: `ecg/data`
-- Payload: plain integer sample or comma-separated sample batch
-- Transport: WiFi + MQTT
+- **Sample Rate**: Configurable (Default 250Hz).
+- **Transport**: DMA-based ADC continuous sampling.
+- **Protocol**: High-performance **Binary Protocol** with Header, Sequence, and CRC8 verification.
+- **Connectivity**: WiFi + MQTT.
 
 ## Configure
 
@@ -14,45 +15,30 @@ From `esp32_firmware/` run:
 idf.py menuconfig
 ```
 
-Set values under `ECG MQTT Publisher`:
+Set values under `ECG Project Configuration`:
 
-- `WiFi SSID`
-- `WiFi password`
-- `MQTT broker URI`
-- `MQTT publish topic`
-- `MQTT samples per publish`
+- `WiFi SSID` & `password`
+- `MQTT broker URI` (e.g. `mqtt://192.168.1.50`)
+- `MQTT samples per publish` (Batch Size)
 - `Sampling rate (Hz)`
-- `ADC1 channel for AD8232 output`
-- optional `LO+` / `LO-` GPIOs
-
-Recommended defaults:
-
-- MQTT topic: `ecg/data`
-- MQTT QoS: `0` for lowest latency
-- MQTT samples per publish: `8`
-- Sampling rate: `250`
-- ADC attenuation enum: `3` (`12dB`)
 
 ## Build and flash
 
 ```bash
-idf.py set-target esp32s3
+idf.py set-target esp32
 idf.py build
-idf.py -p /dev/tty.usbmodemXXXX flash monitor
+idf.py -p <YOUR_PORT> flash monitor
 ```
 
 ## Streamlit side
 
 In the repo root app:
 
-- `Input source` = `MQTT`
-- `Inference backend` = `ONNX`
-- `MQTT broker host` = the machine running Mosquitto
-- `MQTT topic` = `ecg/data`
+- `Broker Host` = The machine running the MQTT broker (Mosquitto).
+- `Topic` = `ecg/data`.
+- `Normalization Window` = Adjust for real-world signal drift.
 
 ## Notes
 
-- This firmware publishes raw ADC samples only. Inference stays on the Pi or laptop.
-- The Python MQTT subscriber accepts single values, comma-separated batches, and JSON `samples` arrays.
-- `LO+` and `LO-` can be left disabled by setting them to `-1`.
-- Real ADC channel selection depends on your exact ESP32-S3 board pinout.
+- **High Fidelity**: Architecture v1 uses the ESP32's DMA controller to ensure zero-jitter sampling, which is critical for the software biquad filters.
+- **Architecture v2**: This firmware is designed as the "Orchestrator" for v2. In v2, the `acquisition_task` will be updated to read from the RP2040/FPGA module instead of the internal ADC.
