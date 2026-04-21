@@ -146,6 +146,7 @@ class ECGSSMClassifier(nn.Module):
     def __init__(self, num_classes: int = 5, d_state: int = 64, hidden: int = 64, depth: int = 3, dropout: float = 0.1):
         super().__init__()
         self.encoder = SSMEncoder(d_state=d_state, hidden=hidden, depth=depth, dropout=dropout)
+        self.streaming_pool = "avgmax"
         self.head = nn.Sequential(
             nn.Linear(hidden * 2, hidden),
             nn.GELU(),
@@ -174,3 +175,29 @@ class ECGSSMClassifier(nn.Module):
         # Let's use a simpler head for the step or just return hidden for now.
         return h, new_states
 
+
+class LegacyECGSSMClassifier(nn.Module):
+    """
+    Backward-compatible classifier for checkpoints trained with an older
+    single-linear head over average pooled encoder states.
+    """
+
+    def __init__(self, num_classes: int = 5, d_state: int = 64, hidden: int = 64, depth: int = 3, dropout: float = 0.1):
+        super().__init__()
+        self.encoder = SSMEncoder(d_state=d_state, hidden=hidden, depth=depth, dropout=dropout)
+        self.streaming_pool = "avg"
+        self.head = nn.Sequential(
+            nn.Identity(),
+            nn.Identity(),
+            nn.Linear(hidden, num_classes)
+        )
+
+    def forward(self, x: torch.Tensor):
+        h = self.encoder(x)
+        avg_p = h.mean(dim=1)
+        logits = self.head(avg_p)
+        return logits
+
+    def step(self, x: torch.Tensor, states: Optional[list] = None):
+        h, new_states = self.encoder.step(x, states)
+        return h, new_states

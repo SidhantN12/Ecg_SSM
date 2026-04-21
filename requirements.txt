@@ -8,3 +8,7 @@ opendatasets
 streamlit
 plotly
 pyserial
+paho-mqtt
+onnx
+onnxruntime
+onnxscript

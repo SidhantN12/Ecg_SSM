@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objs as go
 import streamlit as st
 
-from infer_stream import RealtimeRunner, simulate_stream_from_csv, serial_stream
+from infer_stream import ONNXRealtimeRunner, RealtimeRunner, mqtt_stream, serial_stream, simulate_stream_from_csv
 
 
 st.set_page_config(page_title="ECG SSM Realtime", layout="wide")
@@ -33,29 +33,50 @@ with st.sidebar:
     st.header("Settings")
     models_dir = st.text_input("Models dir", value="models")
     data_dir = st.text_input("Data dir (for simulation)", value="data")
-    source = st.selectbox("Input source", ["Simulated", "Serial"], index=0)
+    source = st.selectbox("Input source", ["Simulated", "Serial", "MQTT"], index=0)
+    backend = st.selectbox("Inference backend", ["PyTorch", "ONNX"], index=0)
     window_size = st.number_input("Window size (samples)", min_value=64, max_value=1024, value=187, step=1)
     sample_rate = st.number_input("Sample rate (Hz)", min_value=50, max_value=1000, value=187, step=1)
     if source == "Serial":
         com_port = st.text_input("COM port (e.g., COM3)", value="COM3")
         baud = st.number_input("Baud rate", min_value=9600, max_value=921600, value=115200, step=1)
         sim_file = ""
+        mqtt_host = ""
+        mqtt_port = 1883
+        mqtt_topic = "ecg/data"
+    elif source == "MQTT":
+        mqtt_host = st.text_input("MQTT broker host", value="localhost")
+        mqtt_port = st.number_input("MQTT broker port", min_value=1, max_value=65535, value=1883, step=1)
+        mqtt_topic = st.text_input("MQTT topic", value="ecg/data")
+        sim_file = ""
+        com_port = ""
+        baud = 115200
     else:
         default_sim = find_default_sim_file(Path(data_dir))
         sim_file = st.text_input("Sim file (mitbih_test.csv)", value=default_sim)
+        mqtt_host = ""
+        mqtt_port = 1883
+        mqtt_topic = "ecg/data"
+        com_port = ""
+        baud = 115200
     run_btn = st.button("Run / Refresh")
 
 
-def model_ready(models_dir: str) -> bool:
-    return Path(models_dir).joinpath("ecg_ssm.pt").exists()
+def model_ready(models_dir: str, backend: str) -> bool:
+    model_name = "ecg_ssm.onnx" if backend == "ONNX" else "ecg_ssm.pt"
+    return Path(models_dir).joinpath(model_name).exists()
 
 
 if "runner" not in st.session_state or run_btn:
-    if not model_ready(models_dir):
-        st.error(f"Model not found at {Path(models_dir) / 'ecg_ssm.pt'}. Train first (python train.py).")
+    model_name = "ecg_ssm.onnx" if backend == "ONNX" else "ecg_ssm.pt"
+    if not model_ready(models_dir, backend):
+        st.error(f"Model not found at {Path(models_dir) / model_name}.")
     else:
         try:
-            st.session_state.runner = RealtimeRunner(models_dir=Path(models_dir), window_size=int(window_size))
+            if backend == "ONNX":
+                st.session_state.runner = ONNXRealtimeRunner(models_dir=Path(models_dir), window_size=int(window_size))
+            else:
+                st.session_state.runner = RealtimeRunner(models_dir=Path(models_dir), window_size=int(window_size))
             st.session_state.last_probs = None
             st.session_state.label = "—"
             st.session_state.samples = []
@@ -90,6 +111,8 @@ def loop_stream():
     # Choose generator
     if source == "Serial":
         gen = serial_stream(port=com_port, baud=int(baud), sample_rate_hz=int(sample_rate))
+    elif source == "MQTT":
+        gen = mqtt_stream(host=mqtt_host, port=int(mqtt_port), topic=mqtt_topic)
     else:
         csv_path = Path(sim_file)
         if not csv_path.exists():
