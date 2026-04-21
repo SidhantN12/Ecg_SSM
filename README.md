@@ -43,17 +43,18 @@ By default, the app is configured for **MQTT Input** from the Architecture v1 ed
 
 For wireless ECG monitoring with Architecture v1 high-fidelity acquisition:
 1.  Flash the firmware located in `esp32_firmware/` to your **ESP32 WROOM 32**.
-2.  The firmware uses **DMA continuous sampling** and publishes via a **Binary Protocol** for zero-jitter telemetry.
+2.  The firmware uses **DMA continuous sampling** at a hardcoded **187 Hz** and publishes via a **Binary Protocol** for zero-jitter telemetry.
 3.  In the Streamlit sidebar:
-    - Select **Input source: MQTT**.
     - Configure your **MQTT Broker Host**.
-    - Adjust **Normalization Window** (samples) for optimal Z-score tracking.
+    - Click **Start** — sample rate and normalization window are fixed system-wide.
 
 ---
 
 ## Technical Notes
 - **Vectorized Training**: Uses an FFT-based global convolution representation for $O(L \log L)$ training efficiency.
-- **Stateful Inference**: Maintains persistent latent states and **Rolling Pooling States** (Mean/Max) for true $O(1)$ updates per sample.
-- **Normalization**: Implements a true **$O(1)$ sliding-window Welford's algorithm** for robust rolling Z-score normalization.
-- **High-Integrity Telemetry**: The MQTT protocol utilizes a binary packet format with **CRC8 verification** and sequence numbering to handle packet loss and ensure data integrity.
-- **ONNX Optimization**: The `export_onnx.py` script replaces complex-valued FFT operations with a recurrent `step()` loop for maximum compatibility with edge inference engines.
+- **Stateful Inference**: Maintains persistent latent states and **Rolling Pooling States** (Mean/Max via Monotonic Queue) for true $O(1)$ updates per sample.
+- **Stability Mapping**: SSM eigenvalues are constrained via $1 - \text{softplus}(a_{raw})$, guaranteeing positive-real decay and preventing high-frequency oscillation.
+- **Normalization**: Implements a drift-resistant **sliding-window Welford's algorithm** with periodic numerical recalibration every 100k samples to prevent `m2` from going negative.
+- **Hardcoded 187 Hz**: The system frequency is a compile-time constant across firmware, Python inference, and model exports — ensuring training-inference alignment with the MIT-BIH dataset.
+- **High-Integrity Telemetry**: Binary MQTT packets carry **CRC8 verification** and monotonically incrementing sequence numbers; the host detects and logs any gaps.
+- **Stateful ONNX Export**: `export_onnx.py` exposes each encoder layer's hidden state as a named Graph Input/Output, enabling true recurrent inference on the RPi 4 via ONNX Runtime.

@@ -31,8 +31,9 @@ streamlit run app.py
 
 In the sidebar:
 - Enter your **MQTT Broker Host**.
-- Set **Sample Rate** to match your device (default 250Hz).
 - Click **Start**.
+
+> **Note:** Sample rate (187 Hz) and normalization window (187 samples) are fixed system-wide and cannot be changed in the sidebar.
 
 ## 4. ESP32 Firmware (Architecture v1)
 
@@ -53,6 +54,8 @@ Set in `menuconfig` under **ECG Project Configuration**:
 - MQTT broker URI (`mqtt://<BROKER_IP>:1883`).
 - Batch size (e.g., 8).
 
+> **Note:** Sample rate is hardcoded to **187 Hz** in firmware — do not add it to menuconfig.
+
 ## 5. Telemetry Protocol
 
 This project uses a high-performance **Binary Telemetry Protocol** to ensure zero-jitter and high integrity.
@@ -67,7 +70,13 @@ This project uses a high-performance **Binary Telemetry Protocol** to ensure zer
 ## 6. Common Issues
 
 ### No predictions yet
-The model waits for a full **Normalization Window** (default 187 samples) before generating the first diagnosis. Adjust this window in the sidebar if needed.
+The model waits for a **warm-up window of 187 samples** before generating the first diagnosis. This is a fixed system constant and is not adjustable.
+
+### Dashboard shows a flatline
+Electrodes are likely disconnected. The firmware's lead-off detection (`LO+`/`LO-`) outputs `0.0` when leads are off. Re-attach electrodes to resume signal.
+
+### `WARNING: Packet Loss Detected` in terminal
+MQTT packets arrived out of sequence. Check your WiFi signal and broker load. The stream will continue; lost packets are logged but not recovered.
 
 ### Portability to Architecture v2
 Because the Python inference engine is decoupled from the sampling source, migrating to the v2 hardware (RP2040 sampler) only requires updating the `acquisition_task` on the ESP32 while keeping the dashboard and model untouched.
