@@ -2,3 +2,6 @@
 .venv/
 models/
 data/
+build/
+esp32_firmware/managed_components/
+
