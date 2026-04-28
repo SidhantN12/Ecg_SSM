@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ECG Latest</string>
+    <string name="app_title">ECG latest result</string>
+    <string name="app_subtitle">Poll the Raspberry Pi endpoint and show the most recent diagnosis.</string>
+    <string name="base_url_label">Raspberry Pi base URL</string>
+    <string name="fetch_button">Fetch latest</string>
+    <string name="label_title">Diagnosis</string>
+    <string name="confidence_title">Confidence</string>
+    <string name="status_title">Status</string>
+    <string name="raw_response_title">Raw response</string>
+    <string name="placeholder_value">-</string>
+    <string name="status_idle">Ready</string>
+    <string name="status_loading">Fetching latest reading...</string>
+    <string name="status_success">Latest reading loaded.</string>
+    <string name="confidence_format">%.1f%%</string>
+    <string name="error_unknown">Something went wrong while reading /latest.</string>
+</resources>
+
