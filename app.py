@@ -1,6 +1,9 @@
 import time
 from pathlib import Path
 from collections import deque
+import threading
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import numpy as np
 import pandas as pd
@@ -12,6 +15,37 @@ from infer_stream import mqtt_stream, RealtimeRunner
 
 st.set_page_config(page_title="ECG Architecture v1", layout="wide")
 st.title("ECG Real-time Visualization & Inference (Architecture v1)")
+
+# --- HTTP Target for Android ---
+@st.cache_resource
+def get_global_state():
+    return {"label": "Waiting...", "confidence": 0.0}
+
+global_prediction_state = get_global_state()
+
+class LatestPredictionHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/latest':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(global_prediction_state).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+            
+    def log_message(self, format, *args):
+        pass
+
+@st.cache_resource
+def start_http_server():
+    server = HTTPServer(('0.0.0.0', 8000), LatestPredictionHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server
+
+start_http_server()
 
 # --- Session State Initialization ---
 if "running" not in st.session_state:
@@ -106,6 +140,10 @@ def main_loop():
                     placeholder_label.metric("Diagnosis", label)
                     max_p = max(probs.values())
                     placeholder_prob.progress(max_p, text=f"Confidence: {max_p:.1%}")
+                    
+                    # Update global state for Android HTTP thread
+                    global_prediction_state["label"] = label
+                    global_prediction_state["confidence"] = max_p
                 
                 last_ui_update = current_time
             
