@@ -1,23 +1,93 @@
-menu "ECG Project Configuration"
+menu "ECG Project Configuration (Arch v1)"
 
 config ECG_WIFI_SSID
     string "WiFi SSID"
-    default "your_ssid"
+    default "YOUR_WIFI_SSID"
+    help
+        WiFi SSID for the ESP32 station connection.
 
 config ECG_WIFI_PASSWORD
-    string "WiFi Password"
-    default "your_password"
+    string "WiFi password"
+    default "YOUR_WIFI_PASSWORD"
+    help
+        WiFi password for the configured SSID.
+
+config ECG_WIFI_AUTHMODE
+    int "Minimum WiFi auth mode"
+    range 0 7
+    default 3
+    help
+        0=OPEN, 1=WEP, 2=WPA_PSK, 3=WPA2_PSK, 4=WPA_WPA2_PSK, 6=WPA3_PSK.
 
 config ECG_MQTT_BROKER_URI
-    string "MQTT Broker URI"
-    default "mqtt://192.168.1.100"
+    string "MQTT broker URI"
+    default "mqtt://192.168.1.100:1883"
+    help
+        Full MQTT broker URI, for example mqtt://192.168.1.100:1883.
 
 config ECG_MQTT_TOPIC
-    string "MQTT Topic"
-    default "/ecg/data"
+    string "MQTT publish topic"
+    default "ecg/data"
+    help
+        Topic used by the ESP32 to publish binary ECG packets.
 
 config ECG_MQTT_QOS
     int "MQTT QoS"
-    default 1
+    range 0 1
+    default 0
+    help
+        QoS 0 is lowest latency. QoS 1 is more reliable but slightly heavier.
+
+config ECG_MQTT_BATCH_SIZE
+    int "MQTT samples per publish"
+    range 1 64
+    default 8
+    help
+        Number of filtered samples combined into one binary MQTT packet.
+
+config ECG_MQTT_KEEPALIVE_SEC
+    int "MQTT keepalive seconds"
+    range 15 600
+    default 60
+
+config ECG_MQTT_RECONNECT_TIMEOUT_MS
+    int "MQTT reconnect timeout (ms)"
+    range 1000 60000
+    default 10000
+
+config ECG_ADC_CHANNEL
+    int "ADC1 channel for AD8232 output"
+    range 0 9
+    default 0
+    help
+        ADC1 channel number used for the AD8232 analog output (Arch v1).
+
+config ECG_ADC_ATTEN_DB
+    int "ADC attenuation enum"
+    range 0 3
+    default 3
+    help
+        ADC attenuation. 0=0dB, 1=2.5dB, 2=6dB, 3=11dB/12dB.
+
+config ECG_LO_PLUS_GPIO
+    int "AD8232 LO+ GPIO"
+    range -1 39
+    default -1
+    help
+        GPIO connected to AD8232 LO+ pin. Use -1 when unused.
+
+config ECG_LO_MINUS_GPIO
+    int "AD8232 LO- GPIO"
+    range -1 39
+    default -1
+    help
+        GPIO connected to AD8232 LO- pin. Use -1 when unused.
+
+config ECG_LOG_EVERY_N_SAMPLES
+    int "Log every N published samples"
+    range 0 10000
+    default 250
+    help
+        Set to 0 to disable periodic status logs.
 
 endmenu

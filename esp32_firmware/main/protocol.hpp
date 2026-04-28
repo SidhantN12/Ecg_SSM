@@ -15,6 +15,8 @@ struct __attribute__((packed)) EcgPacketHeader {
     uint8_t batch_size;
 };
 
+static_assert(sizeof(EcgPacketHeader) == 6, "EcgPacketHeader size must be exactly 6 bytes for binary compatibility");
+
 /**
  * @brief Simple CRC-8 implementation (Polynomial: 0x07)
  */

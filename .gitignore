@@ -4,4 +4,4 @@ models/
 data/
 build/
 esp32_firmware/managed_components/
-
+esp32_firmware/.cache/

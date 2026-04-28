@@ -78,8 +78,10 @@ Exports the trained model to ONNX in **stateful one-step mode**: the `ONNXExport
 The Streamlit frontend dashboard. Sample rate (187 Hz) and normalization window (187 samples) are fixed constants — removed from the sidebar to prevent misconfiguration.
 
 ### `esp32_firmware/`
-C++/ESP-IDF firmware for high-fidelity ECG publishing. Key properties:
+C++/ESP-IDF v6.0 firmware for high-fidelity ECG publishing. Key properties:
+- **IDF Version**: Fully refactored for **ESP-IDF v6.0**, using modern `esp_check.h` error handling.
 - **Sample rate**: Hardcoded to **187 Hz** (`SAMPLE_RATE_HZ = 187`).
+- **Drivers**: Uses modern `esp_adc` and `esp_driver_gpio` components.
 - **Packet buffer**: Correctly sized to `sizeof(Header) + (BATCH_SIZE × 4) + 1` bytes.
 - **Lead-off detection**: Reads `LO+` / `LO-` GPIOs each acquisition cycle; outputs `0.0f` if either pin is asserted, preventing garbage classification.
 - **Sequence tracking**: Host-side sequence counter detects and logs dropped MQTT packets.
@@ -135,6 +137,7 @@ Wraps `model.step_stateful()`. The `forward(x, *states)` signature takes a singl
 ---
 
 ### Architecture v1 Telemetry
-1. Flash `esp32_firmware/` to an ESP32 WROOM 32.
+1. Flash `esp32_firmware/` to an ESP32 WROOM 32 using **ESP-IDF v6.0**.
 2. Configuration is handled via `idf.py menuconfig` (WiFi, MQTT URI, Batch Size only — sample rate is hardcoded).
-3. Set **MQTT Source** in `app.py` sidebar and click Start.
+3. Ensure the `espressif/mqtt` component is managed via the IDF Component Manager (handled automatically by `idf_component.yml`).
+4. Set **MQTT Source** in `app.py` sidebar and click Start.

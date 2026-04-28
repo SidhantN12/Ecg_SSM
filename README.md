@@ -42,8 +42,8 @@ By default, the app is configured for **MQTT Input** from the Architecture v1 ed
 ## Hardware Integration
 
 For wireless ECG monitoring with Architecture v1 high-fidelity acquisition:
-1.  Flash the firmware located in `esp32_firmware/` to your **ESP32 WROOM 32**.
-2.  The firmware uses **DMA continuous sampling** at a hardcoded **187 Hz** and publishes via a **Binary Protocol** for zero-jitter telemetry.
+1.  Flash the firmware located in `esp32_firmware/` to your **ESP32 WROOM 32** using **ESP-IDF v6.0**.
+2.  The firmware uses **DMA continuous sampling** at a hardcoded **187 Hz** and publishes via a **Binary Protocol** for zero-jitter telemetry. The codebase is fully refactored for the v6.0 driver architecture.
 3.  In the Streamlit sidebar:
     - Configure your **MQTT Broker Host**.
     - Click **Start** — sample rate and normalization window are fixed system-wide.
