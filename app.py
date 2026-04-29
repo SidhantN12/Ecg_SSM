@@ -1,6 +1,11 @@
 import time
 from pathlib import Path
 from collections import deque
+import threading
+import json
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
 import numpy as np
 import pandas as pd
@@ -12,6 +17,37 @@ from infer_stream import mqtt_stream, RealtimeRunner
 
 st.set_page_config(page_title="ECG Architecture v1", layout="wide")
 st.title("ECG Real-time Visualization & Inference (Architecture v1)")
+
+# --- HTTP Target for Android ---
+@st.cache_resource
+def get_global_state():
+    return {"label": "Waiting...", "confidence": 0.0}
+
+global_prediction_state = get_global_state()
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get('/latest')
+def get_latest():
+    return global_prediction_state
+
+@st.cache_resource
+def start_http_server():
+    def run_server():
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+    return t
+
+start_http_server()
 
 # --- Session State Initialization ---
 if "running" not in st.session_state:
@@ -106,6 +142,10 @@ def main_loop():
                     placeholder_label.metric("Diagnosis", label)
                     max_p = max(probs.values())
                     placeholder_prob.progress(max_p, text=f"Confidence: {max_p:.1%}")
+                    
+                    # Update global state for Android HTTP thread
+                    global_prediction_state["label"] = label
+                    global_prediction_state["confidence"] = max_p
                 
                 last_ui_update = current_time
             
