@@ -1,96 +1,103 @@
 package com.ecgssm.nativeapp
 
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import android.util.Log
+import okhttp3.*
 import org.json.JSONObject
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
-class LatestApiClient(
-    private val client: OkHttpClient = OkHttpClient()
-) {
-    suspend fun fetchLatest(baseUrl: String): LatestReading {
-        val normalizedBaseUrl = normalizeBaseUrl(baseUrl)
+class LatestApiClient {
+    private val client = OkHttpClient()
+
+    suspend fun fetchLatest(baseUrl: String): LatestReading = suspendCoroutine { continuation ->
+        val url = if (baseUrl.endsWith("/")) "${baseUrl}latest" else "$baseUrl/latest"
+        
         val request = Request.Builder()
-            .url("$normalizedBaseUrl/latest")
-            .get()
+            .url(url)
             .build()
 
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("Server returned HTTP ${response.code}")
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                continuation.resumeWith(Result.failure(e))
             }
 
-            val body = response.body?.string().orEmpty()
-            if (body.isBlank()) {
-                throw IllegalStateException("The /latest endpoint returned an empty response.")
+            override fun onResponse(call: Call, response: Response) {
+                response.use { 
+                    if (!response.isSuccessful) {
+                        continuation.resumeWith(Result.failure(IOException("Server returned ${response.code}")))
+                        return
+                    }
+
+                    val body = response.body?.string()
+                    if (body == null) {
+                        continuation.resumeWith(Result.failure(IOException("Empty response from server")))
+                        return
+                    }
+
+                    try {
+                        val json = JSONObject(body)
+                        val reading = parseJson(json, body)
+                        if (reading != null) {
+                            continuation.resume(reading)
+                        } else {
+                            continuation.resumeWith(Result.failure(IOException("Could not find diagnosis data in JSON")))
+                        }
+                    } catch (e: Exception) {
+                        continuation.resumeWith(Result.failure(IOException("Failed to parse JSON: ${e.message}")))
+                    }
+                }
             }
-
-            return parseLatestReading(body)
-        }
+        })
     }
 
-    private fun normalizeBaseUrl(baseUrl: String): String {
-        val trimmed = baseUrl.trim().trimEnd('/')
-        require(trimmed.isNotEmpty()) { "Enter the Raspberry Pi host, for example 192.168.1.50:8000." }
-        return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-            trimmed
-        } else {
-            "http://$trimmed"
-        }
-    }
-
-    private fun parseLatestReading(rawJson: String): LatestReading {
-        val root = JSONObject(rawJson)
-        val payload = when {
-            root.has("result") && root.opt("result") is JSONObject -> root.getJSONObject("result")
-            root.has("latest") && root.opt("latest") is JSONObject -> root.getJSONObject("latest")
-            else -> root
+    private fun parseJson(json: JSONObject, rawJson: String): LatestReading? {
+        // Try to find label
+        val label = findString(json, listOf("label", "diagnosis", "prediction", "class"))
+        
+        // Try to find confidence
+        var confidence = findDouble(json, listOf("confidence", "probability", "prob", "score", "accuracy"))
+        
+        // If confidence is null, try to look into a "probabilities" or "results" object if we have a label
+        if (confidence == null && label != null) {
+            confidence = confidenceFromProbabilities(json, label)
         }
 
-        val label = firstNonBlankString(
-            payload,
-            "label",
-            "diagnosis",
-            "prediction",
-            "predicted_label",
-            "class_name"
-        ) ?: throw IllegalStateException("Could not find a diagnosis label in the /latest response.")
-
-        val confidence = firstNumber(
-            payload,
-            "confidence",
-            "probability",
-            "score",
-            "max_probability"
-        ) ?: confidenceFromProbabilities(payload, label)
-        ?: throw IllegalStateException("Could not find a confidence value in the /latest response.")
+        if (label == null) return null
 
         return LatestReading(
             label = label,
-            confidence = normalizeConfidence(confidence),
+            confidence = confidence ?: 0.0,
             rawJson = rawJson
         )
     }
 
-    private fun firstNonBlankString(json: JSONObject, vararg keys: String): String? {
+    private fun findString(json: JSONObject, keys: List<String>): String? {
         for (key in keys) {
-            val value = json.optString(key, "").trim()
-            if (value.isNotEmpty()) {
-                return value
-            }
+            if (json.has(key)) return json.optString(key)
+        }
+        // Try nested result
+        if (json.has("result")) {
+            val result = json.optJSONObject("result")
+            if (result != null) return findString(result, keys)
         }
         return null
     }
 
-    private fun firstNumber(json: JSONObject, vararg keys: String): Double? {
+    private fun findDouble(json: JSONObject, keys: List<String>): Double? {
         for (key in keys) {
-            if (!json.has(key)) {
-                continue
+            if (json.has(key)) {
+                val value = json.opt(key)
+                when (value) {
+                    is Number -> return value.toDouble()
+                    is String -> value.toDoubleOrNull()?.let { return it }
+                }
             }
-            val value = json.opt(key)
-            when (value) {
-                is Number -> return value.toDouble()
-                is String -> value.toDoubleOrNull()?.let { return it }
-            }
+        }
+        // Try nested result
+        if (json.has("result")) {
+            val result = json.optJSONObject("result")
+            if (result != null) return findDouble(result, keys)
         }
         return null
     }
@@ -101,7 +108,7 @@ class LatestApiClient(
             probabilities.has(label) -> probabilities.optDouble(label)
             probabilities.has(label.substringBefore(" ")) -> probabilities.optDouble(label.substringBefore(" "))
             else -> null
-        }.takeIf { !it.isNaN() }
+        }?.takeIf { !it.isNaN() }
     }
 
     private fun normalizeConfidence(value: Double): Double {
@@ -114,4 +121,3 @@ class LatestApiClient(
         }
     }
 }
-
