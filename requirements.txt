@@ -12,3 +12,5 @@ paho-mqtt
 onnx
 onnxruntime
 onnxscript
+fastapi
+uvicorn

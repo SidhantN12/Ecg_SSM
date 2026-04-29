@@ -3,7 +3,9 @@ from pathlib import Path
 from collections import deque
 import threading
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
 import numpy as np
 import pandas as pd
@@ -23,27 +25,27 @@ def get_global_state():
 
 global_prediction_state = get_global_state()
 
-class LatestPredictionHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/latest':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(global_prediction_state).encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
-            
-    def log_message(self, format, *args):
-        pass
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get('/latest')
+def get_latest():
+    return global_prediction_state
 
 @st.cache_resource
 def start_http_server():
-    server = HTTPServer(('0.0.0.0', 8000), LatestPredictionHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
+    def run_server():
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
+    t = threading.Thread(target=run_server, daemon=True)
     t.start()
-    return server
+    return t
 
 start_http_server()
 
