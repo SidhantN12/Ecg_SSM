@@ -1,6 +1,10 @@
 ﻿__pycache__/
 .venv/
-models/
+models/*
+!models/ecg_ssm.onnx
+!models/ecg_ssm.onnx.data
+!models/ecg_ssm.pt
+!models/ecg_ssm_scripted.pt
 data/
 build/
 esp32_firmware/managed_components/
