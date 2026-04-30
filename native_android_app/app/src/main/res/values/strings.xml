@@ -3,7 +3,7 @@
     <string name="app_name">ECG Latest</string>
     <string name="app_title">ECG latest result</string>
     <string name="app_subtitle">Poll the Raspberry Pi endpoint and show the most recent diagnosis.</string>
-    <string name="base_url_label">Raspberry Pi base URL</string>
+    <string name="base_url_label">MQTT base URL</string>
     <string name="fetch_button">Fetch latest</string>
     <string name="label_title">Diagnosis</string>
     <string name="confidence_title">Confidence</string>
