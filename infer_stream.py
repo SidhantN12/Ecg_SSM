@@ -8,9 +8,6 @@ import struct
 import math
 
 import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
 
 try:
     import serial  # pyserial
@@ -27,7 +24,10 @@ try:
 except Exception:
     mqtt = None
 
-from ssm_model import ECGSSMClassifier, LegacyECGSSMClassifier
+try:
+    import torch
+except Exception:
+    torch = None
 
 
 LABEL_MAP = {
@@ -88,7 +88,12 @@ class WelfordOnline:
         return (x - self.mean) / std
 
 
-def load_model(models_dir: Path) -> ECGSSMClassifier:
+def load_model(models_dir: Path) -> object:
+    if torch is None:
+        raise RuntimeError("torch not installed. Install torch to use the PyTorch runner, or use ONNXRealtimeRunner.")
+
+    from ssm_model import ECGSSMClassifier, LegacyECGSSMClassifier
+
     models_dir = Path(models_dir)
     ckpt = torch.load(models_dir / "ecg_ssm.pt", map_location="cpu")
     cfg = ckpt["config"]
@@ -114,6 +119,8 @@ def simulate_stream_from_csv(csv_path: Path, sample_rate_hz: int = 187, loop: bo
     Yields samples by stitching beats sequentially from MIT-BIH CSV rows.
     Keep for testing/debugging purposes.
     """
+    import pandas as pd
+
     df = pd.read_csv(csv_path, header=None)
     X = df.iloc[:, :-1].values
     while True:
@@ -254,29 +261,36 @@ def softmax_np(x: np.ndarray) -> np.ndarray:
 
 class RealtimeRunner:
     def __init__(self, models_dir: Path, device: Optional[str] = None):
+        if torch is None:
+            raise RuntimeError("torch not installed. Install torch to use RealtimeRunner, or use ONNXRealtimeRunner.")
+
         self.model = load_model(models_dir)
         self.device = torch.device(device) if device else torch.device("cpu")
         self.model.to(self.device)
         self.window_size = 187 # Fixed for standardize flow
         self.normalizer = WelfordOnline(window_size=self.window_size)
         self.states = None
-    @torch.no_grad()
-    def step(self, sample: float) -> Optional[Tuple[str, Dict[str, float]]]:
-        # 1. O(1) Normalization
-        x_norm = self.normalizer.update(sample)
-        
-        # 2. Stateful SSM + Pooling Step (Now O(1) internally)
-        xt = torch.tensor([[x_norm]], device=self.device, dtype=torch.float32)
-        logits, self.states = self.model.step(xt, self.states)
-        
-        # 3. Handle Prediction (Wait for window to fill)
-        if len(self.normalizer.samples) < self.window_size:
-            return None
 
-        probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
-        pred = int(probs.argmax())
-        label = LABEL_MAP.get(pred, str(pred))
-        return label, {LABEL_MAP[i]: float(p) for i, p in enumerate(probs)}
+    def step(self, sample: float) -> Optional[Tuple[str, Dict[str, float]]]:
+        if torch is None:
+            raise RuntimeError("torch not installed. Install torch to use RealtimeRunner, or use ONNXRealtimeRunner.")
+
+        with torch.no_grad():
+            # 1. O(1) Normalization
+            x_norm = self.normalizer.update(sample)
+
+            # 2. Stateful SSM + Pooling Step (Now O(1) internally)
+            xt = torch.tensor([[x_norm]], device=self.device, dtype=torch.float32)
+            logits, self.states = self.model.step(xt, self.states)
+
+            # 3. Handle Prediction (Wait for window to fill)
+            if len(self.normalizer.samples) < self.window_size:
+                return None
+
+            probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+            pred = int(probs.argmax())
+            label = LABEL_MAP.get(pred, str(pred))
+            return label, {LABEL_MAP[i]: float(p) for i, p in enumerate(probs)}
 
 
 class ONNXRealtimeRunner:
@@ -286,42 +300,60 @@ class ONNXRealtimeRunner:
 
         model_path = Path(models_dir) / "ecg_ssm.onnx"
         self.session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-        
-        # New stateful architecture: Multiple inputs/outputs
-        self.input_name = "input"
+
+        input_names = [inp.name for inp in self.session.get_inputs()]
+        self.input_name = "input" if "input" in input_names else input_names[0]
+        self.input_shape = next(inp.shape for inp in self.session.get_inputs() if inp.name == self.input_name)
         self.window_size = 187
         self.normalizer = WelfordOnline(window_size=self.window_size)
-        
-        # Initialize states for each SSM layer
-        # We need to inspect the model or use a fixed depth
-        self.states = {} 
-        for i in range(10): # Max layers safety
-            name = f"state_{i}"
-            # Check if this state exists in inputs
-            if any(inp.name == name for inp in self.session.get_inputs()):
-                # Get shape from model
-                shape = next(inp.shape for inp in self.session.get_inputs() if inp.name == name)
-                # handle dynamic axes if any (-1)
-                final_shape = [1 if isinstance(s, str) or s < 0 else s for s in shape]
-                self.states[name] = np.zeros(final_shape, dtype=np.float32)
+        self.window = deque(maxlen=self.window_size)
+
+        self.states = {}
+        for inp in self.session.get_inputs():
+            if inp.name == self.input_name:
+                continue
+            self.states[inp.name] = np.zeros(self._static_shape(inp.shape), dtype=np.float32)
+
+    @staticmethod
+    def _static_shape(shape) -> list[int]:
+        return [dim if isinstance(dim, int) and dim > 0 else 1 for dim in shape]
+
+    def _uses_window_input(self) -> bool:
+        return any(dim == self.window_size for dim in self.input_shape if isinstance(dim, int))
+
+    def _format_input(self, sample: float) -> np.ndarray:
+        if not self._uses_window_input():
+            return np.array([[sample]], dtype=np.float32)
+
+        x = np.asarray(self.window, dtype=np.float32)
+        if len(self.input_shape) == 3:
+            if self.input_shape[1] == self.window_size:
+                return x.reshape(1, self.window_size, 1)
+            return x.reshape(1, 1, self.window_size)
+        return x.reshape(1, self.window_size)
 
     def step(self, sample: float) -> Optional[Tuple[str, Dict[str, float]]]:
         # 1. O(1) Normalization
         x_norm = self.normalizer.update(sample)
-        if self.normalizer.count < self.window_size:
+        self.window.append(x_norm)
+        if len(self.window) < self.window_size:
             return None
 
-        # 2. Stateful Inference
-        inputs = {self.input_name: np.array([[x_norm]], dtype=np.float32)}
+        # 2. ONNX inference
+        inputs = {self.input_name: self._format_input(x_norm)}
         inputs.update(self.states)
         
         outputs = self.session.run(None, inputs)
         logits = outputs[0]
         
-        # Update states from outputs (matching inputs/outputs by name/order)
-        # Assuming outputs after logits are the new states
-        for i, out_meta in enumerate(self.session.get_outputs()[1:]):
-            self.states[out_meta.name] = outputs[i+1]
+        if self.states:
+            # Update states from outputs. Export names are state_0_out, state_1_out, ...
+            state_input_names = [name for name in self.states.keys()]
+            for i, out_meta in enumerate(self.session.get_outputs()[1:]):
+                state_name = out_meta.name[:-4] if out_meta.name.endswith("_out") else out_meta.name
+                if state_name not in self.states and i < len(state_input_names):
+                    state_name = state_input_names[i]
+                self.states[state_name] = outputs[i + 1]
 
         probs = softmax_np(np.asarray(logits[0], dtype=np.float32))
         pred = int(np.argmax(probs))

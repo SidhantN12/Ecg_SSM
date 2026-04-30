@@ -8,11 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 import numpy as np
-import pandas as pd
 import plotly.graph_objs as go
 import streamlit as st
 
-from infer_stream import mqtt_stream, RealtimeRunner
+from infer_stream import mqtt_stream, ONNXRealtimeRunner
 
 
 st.set_page_config(page_title="ECG Architecture v1", layout="wide")
@@ -103,7 +102,7 @@ def render_plot(xs, ys):
 
 def main_loop():
     # Initialize Runner
-    runner = RealtimeRunner(models_dir=Path("models"), window_size=norm_window)
+    runner = ONNXRealtimeRunner(models_dir=Path("models"))
     
     # Initialize Deques for plotting (Circular buffers)
     max_points = int(sample_rate * display_seconds)
