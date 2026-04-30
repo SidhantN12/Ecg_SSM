@@ -1,0 +1,7 @@
+numpy
+streamlit
+plotly
+paho-mqtt
+onnxruntime
+fastapi
+uvicorn

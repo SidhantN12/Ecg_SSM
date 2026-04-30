@@ -9,7 +9,9 @@ import uvicorn
 import numpy as np
 import plotly.graph_objs as go
 import streamlit as st
+
 from infer_stream import mqtt_stream, ONNXRealtimeRunner
+
 
 st.set_page_config(page_title="ECG Architecture v1", layout="wide")
 st.title("ECG Real-time Visualization & Inference (Architecture v1)")
@@ -18,6 +20,7 @@ st.title("ECG Real-time Visualization & Inference (Architecture v1)")
 @st.cache_resource
 def get_global_state():
     return {"label": "Waiting...", "confidence": 0.0}
+
 
 global_prediction_state = get_global_state()
 
@@ -30,17 +33,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get('/latest')
+
+@app.get("/latest")
 def get_latest():
     return global_prediction_state
+
 
 @st.cache_resource
 def start_http_server():
     def run_server():
         uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
+
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
     return t
+
 
 start_http_server()
 
@@ -56,16 +63,14 @@ with st.sidebar:
 
     st.header("Processing Settings")
     sample_rate = 187
-    norm_window = 187
     display_seconds = st.slider("Display Window (sec)", 1, 20, 5)
 
-    # Check ONNX model exists and warn early
     onnx_path = Path("models") / "ecg_ssm.onnx"
+    onnx_data_path = Path("models") / "ecg_ssm.onnx.data"
     if not onnx_path.exists():
-        st.warning(
-            "⚠️ `models/ecg_ssm.onnx` not found. "
-            "Run `python export_onnx.py` to generate it before starting."
-        )
+        st.warning("models/ecg_ssm.onnx not found. Run python export_onnx.py before starting.")
+    elif not onnx_data_path.exists():
+        st.warning("models/ecg_ssm.onnx.data not found. Keep it next to models/ecg_ssm.onnx.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -88,13 +93,15 @@ with c3:
 
 def render_plot(xs, ys):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=xs,
-        y=ys,
-        mode='lines',
-        name='Filtered ECG',
-        line=dict(color='#00FF00', width=2)
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=ys,
+            mode="lines",
+            name="Filtered ECG",
+            line=dict(color="#00FF00", width=2),
+        )
+    )
     fig.update_layout(
         height=400,
         template="plotly_dark",
@@ -121,7 +128,7 @@ def main_loop():
 
     start_t = time.time()
     last_ui_update = 0
-    ui_update_interval = 1.0 / 20.0  # 20 Hz UI refresh
+    ui_update_interval = 1.0 / 20.0
 
     try:
         for s in gen:

@@ -1,15 +1,17 @@
 """
-infer_stream.py  —  ONNX-only inference + MQTT streaming.
-No PyTorch dependency. Requires: onnxruntime, paho-mqtt, numpy.
+ONNX inference and MQTT streaming for the Raspberry Pi ECG app.
+
+The deployment path intentionally avoids PyTorch. It requires onnxruntime,
+paho-mqtt, and numpy.
 """
 
-import time
-import math
 import json
+import math
 import struct
+import time
 from collections import deque
-from queue import Queue
 from pathlib import Path
+from queue import Queue
 from typing import Dict, Generator, Optional, Tuple
 
 import numpy as np
@@ -24,9 +26,6 @@ try:
 except ImportError:
     mqtt = None
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 LABEL_MAP = {
     0: "N (Normal)",
@@ -36,11 +35,8 @@ LABEL_MAP = {
     4: "Q (Unknown)",
 }
 
-WARMUP_SAMPLES = 187  # must match training / export constant
+WARMUP_SAMPLES = 187
 
-# ---------------------------------------------------------------------------
-# CRC helper (matches ESP32 firmware)
-# ---------------------------------------------------------------------------
 
 def crc8_python(data: bytes) -> int:
     crc = 0x00
@@ -54,16 +50,13 @@ def crc8_python(data: bytes) -> int:
             crc &= 0xFF
     return crc
 
-# ---------------------------------------------------------------------------
-# Online normalizer — drift-resistant sliding-window Welford's algorithm
-# ---------------------------------------------------------------------------
 
 class WelfordOnline:
     """O(1) sliding-window mean/std normalizer."""
 
-    def __init__(self, window_size: int = 187):
+    def __init__(self, window_size: int = WARMUP_SAMPLES):
         self.window_size = window_size
-        self.samples: deque = deque(maxlen=window_size)
+        self.samples = deque(maxlen=window_size)
         self.mean = 0.0
         self.m2 = 0.0
         self.count = 0
@@ -71,7 +64,6 @@ class WelfordOnline:
     def update(self, x: float) -> float:
         self.count += 1
 
-        # Periodic numerical recalibration every 100k samples
         if self.count % 100_000 == 0 and len(self.samples) == self.window_size:
             arr = np.array(self.samples)
             self.mean = float(arr.mean())
@@ -96,140 +88,117 @@ class WelfordOnline:
         std = std if std > 1e-6 else 1.0
         return (x - self.mean) / std
 
-# ---------------------------------------------------------------------------
-# Softmax (numpy)
-# ---------------------------------------------------------------------------
 
 def softmax_np(x: np.ndarray) -> np.ndarray:
     shifted = x - np.max(x)
     exp_x = np.exp(shifted)
     return exp_x / exp_x.sum()
 
-# ---------------------------------------------------------------------------
-# ONNX Realtime Runner
-# ---------------------------------------------------------------------------
 
 class ONNXRealtimeRunner:
-    """
-    Stateful, sample-by-sample inference using the exported ONNX graph.
-
-    The ONNX graph (from export_onnx.py) has:
-        Inputs : "input", "state_0", "state_1", ..., "state_{N-1}"
-        Outputs: "output", "state_0_out", "state_1_out", ..., "state_{N-1}_out"
-
-    On each call to step() we feed the current states in, read the updated
-    states out, and store them under the INPUT names ready for the next call.
-    """
-
     def __init__(self, models_dir: Path):
         if ort is None:
-            raise RuntimeError(
-                "onnxruntime is not installed. Run: pip install onnxruntime"
-            )
+            raise RuntimeError("onnxruntime is not installed. Run: pip install onnxruntime")
 
         model_path = Path(models_dir) / "ecg_ssm.onnx"
         if not model_path.exists():
-            raise FileNotFoundError(
-                f"ONNX model not found at {model_path}. "
-                "Run `python export_onnx.py` to generate it."
-            )
+            raise FileNotFoundError(f"ONNX model not found at {model_path}")
 
-        self.session = ort.InferenceSession(
-            str(model_path), providers=["CPUExecutionProvider"]
-        )
+        self.session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        self.output_names = [out.name for out in self.session.get_outputs()]
 
-        # Collect input / output metadata once
-        self._input_names  = [inp.name for inp in self.session.get_inputs()]
-        self._output_names = [out.name for out in self.session.get_outputs()]
+        inputs = self.session.get_inputs()
+        input_names = [inp.name for inp in inputs]
+        self.input_name = "input" if "input" in input_names else input_names[0]
+        self.input_shape = next(inp.shape for inp in inputs if inp.name == self.input_name)
 
-        # "input" is the signal; everything else is a recurrent state
-        self._signal_input = "input"
-        self._state_input_names  = [n for n in self._input_names  if n != "input"]
-        # The corresponding outputs carry an "_out" suffix (from export_onnx.py)
-        # e.g. state_0 → state_0_out.  We build a mapping: output_name → input_name
-        self._out_to_in: Dict[str, str] = {}
-        for in_name in self._state_input_names:
-            out_name = in_name + "_out"
-            if out_name in self._output_names:
-                self._out_to_in[out_name] = in_name
-            else:
-                # Fallback: same name (defensive)
-                self._out_to_in[in_name] = in_name
+        self.window_size = WARMUP_SAMPLES
+        self.normalizer = WelfordOnline(window_size=self.window_size)
+        self.window = deque(maxlen=self.window_size)
 
-        # Initialize zero states keyed by INPUT name
-        self._states: Dict[str, np.ndarray] = {}
-        for inp in self.session.get_inputs():
-            if inp.name == "input":
+        self.states: Dict[str, np.ndarray] = {}
+        for inp in inputs:
+            if inp.name == self.input_name:
                 continue
-            shape = [1 if (isinstance(s, str) or s < 0) else s for s in inp.shape]
-            self._states[inp.name] = np.zeros(shape, dtype=np.float32)
+            self.states[inp.name] = np.zeros(self._static_shape(inp.shape), dtype=np.float32)
 
-        self.normalizer = WelfordOnline(window_size=WARMUP_SAMPLES)
+    @staticmethod
+    def _static_shape(shape) -> list[int]:
+        return [dim if isinstance(dim, int) and dim > 0 else 1 for dim in shape]
 
-    # ------------------------------------------------------------------
+    def _uses_window_input(self) -> bool:
+        return any(dim == self.window_size for dim in self.input_shape if isinstance(dim, int))
+
+    def _format_input(self, sample: float) -> np.ndarray:
+        if not self._uses_window_input():
+            return np.array([[sample]], dtype=np.float32)
+
+        x = np.asarray(self.window, dtype=np.float32)
+        if len(self.input_shape) == 3:
+            if self.input_shape[1] == self.window_size:
+                return x.reshape(1, self.window_size, 1)
+            return x.reshape(1, 1, self.window_size)
+        return x.reshape(1, self.window_size)
 
     def step(self, sample: float) -> Optional[Tuple[str, Dict[str, float]]]:
-        """
-        Process one sample.  Returns (label, probs_dict) after warm-up,
-        None during warm-up.
-        """
         x_norm = self.normalizer.update(sample)
-
-        if self.normalizer.count < WARMUP_SAMPLES:
+        self.window.append(x_norm)
+        if len(self.window) < self.window_size:
             return None
 
-        # Build feed dict: signal + current states (keyed by INPUT name)
-        feed: Dict[str, np.ndarray] = {
-            self._signal_input: np.array([[x_norm]], dtype=np.float32)
-        }
-        feed.update(self._states)
+        feeds = {self.input_name: self._format_input(x_norm)}
+        feeds.update(self.states)
 
-        outputs = self.session.run(self._output_names, feed)
-        out_map = dict(zip(self._output_names, outputs))
+        outputs = self.session.run(self.output_names, feeds)
+        logits = np.asarray(outputs[0], dtype=np.float32)
 
-        # Update states: map output names → input names
-        for out_name, in_name in self._out_to_in.items():
-            self._states[in_name] = out_map[out_name]
+        if self.states:
+            state_input_names = list(self.states.keys())
+            for i, out_meta in enumerate(self.session.get_outputs()[1:]):
+                state_name = out_meta.name[:-4] if out_meta.name.endswith("_out") else out_meta.name
+                if state_name not in self.states and i < len(state_input_names):
+                    state_name = state_input_names[i]
+                self.states[state_name] = outputs[i + 1]
 
-        # First output is logits
-        logits = np.asarray(out_map[self._output_names[0]], dtype=np.float32).ravel()
-        probs  = softmax_np(logits)
-        pred   = int(np.argmax(probs))
-        label  = LABEL_MAP.get(pred, str(pred))
-
+        probs = softmax_np(logits.ravel())
+        pred = int(np.argmax(probs))
+        label = LABEL_MAP.get(pred, str(pred))
         return label, {LABEL_MAP[i]: float(p) for i, p in enumerate(probs)}
 
-# ---------------------------------------------------------------------------
-# MQTT streaming generator
-# ---------------------------------------------------------------------------
 
-def parse_mqtt_samples(payload: str) -> list:
+def parse_mqtt_samples(payload: str) -> list[float]:
     payload = payload.strip()
     if not payload:
         return []
+
     try:
         return [float(payload)]
     except ValueError:
         pass
+
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
         data = None
+
     if isinstance(data, dict) and isinstance(data.get("samples"), list):
         try:
             return [float(v) for v in data["samples"]]
         except (TypeError, ValueError):
             return []
+
     if isinstance(data, list):
         try:
             return [float(v) for v in data]
         except (TypeError, ValueError):
             return []
+
     if "," in payload:
         try:
-            return [float(p.strip()) for p in payload.split(",") if p.strip()]
+            return [float(part.strip()) for part in payload.split(",") if part.strip()]
         except ValueError:
             return []
+
     return []
 
 
@@ -243,8 +212,8 @@ def mqtt_stream(
     if mqtt is None:
         raise RuntimeError("paho-mqtt not installed. Run: pip install paho-mqtt")
 
-    samples: Queue = Queue()
-    errors:  Queue = Queue()
+    samples: Queue[float] = Queue()
+    errors: Queue[Exception] = Queue()
     expected_seq = None
 
     def on_connect(client, userdata, flags, rc, properties=None):
@@ -260,30 +229,25 @@ def mqtt_stream(
             return
 
         if payload[0] == 0xA5:
-            # Binary telemetry protocol
-            magic, seq, count = struct.unpack("<BIB", payload[:6])
+            _, seq, count = struct.unpack("<BIB", payload[:6])
             if expected_seq is not None and seq != expected_seq:
                 lost = (seq - expected_seq) & 0xFFFFFFFF
-                print(
-                    f"WARNING: Packet Loss Detected! "
-                    f"Expected {expected_seq}, got {seq}. Lost ~{lost} batches."
-                )
+                print(f"WARNING: Packet loss detected. Expected {expected_seq}, got {seq}. Lost ~{lost} batches.")
             expected_seq = (seq + 1) & 0xFFFFFFFF
 
             data_end = 6 + count * 4
             if len(payload) < data_end + 1:
                 return
             if crc8_python(payload[:data_end]) != payload[data_end]:
-                print("CRC Mismatch — packet dropped")
+                print("CRC mismatch; packet dropped")
                 return
-            for s in struct.unpack(f"<{count}f", payload[6:data_end]):
-                samples.put(s)
+            for sample in struct.unpack(f"<{count}f", payload[6:data_end]):
+                samples.put(sample)
         else:
-            # Fallback: UTF-8 text / JSON / CSV
             try:
                 line = payload.decode("utf-8", errors="ignore").strip()
-                for val in parse_mqtt_samples(line):
-                    samples.put(val)
+                for sample in parse_mqtt_samples(line):
+                    samples.put(sample)
             except Exception:
                 pass
 
